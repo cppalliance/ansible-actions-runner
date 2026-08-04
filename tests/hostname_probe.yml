@@ -1,0 +1,10 @@
+---
+# Stands in for the real per-platform hostname tasks. tests/hostname.yml points
+# gha_hostname_tasks_map at this file so that dispatch and validation can be
+# exercised without renaming the machine running the test suite.
+
+- name: Record what the role resolved before dispatching
+  ansible.builtin.set_fact:
+    gha_probe_hostname: "{{ gha_hostname }}"
+    gha_probe_fqdn: "{{ gha_hostname_fqdn }}"
+    gha_probe_domain: "{{ gha_hostname_domain }}"

@@ -1,0 +1,51 @@
+---
+# The runner is a .NET application. The tarball carries its own .NET runtime,
+# but not the native libraries that runtime is linked against, so config.sh
+# refuses to start with "Libicu's dependencies is missing for Dotnet Core 6.0"
+# on a host that lacks them.
+#
+# Those package names are version-stamped and vary by distro release — GitHub's
+# own script walks libicu80 down to libicu52 until one installs — so pinning
+# them in defaults would break on the next Debian. Running the script that ships
+# with the runner keeps the list correct for whatever release is being
+# installed, and it is the remedy GitHub's own error message names.
+#
+# Only bin/installdependencies.sh is unpacked, rather than reusing a runner's
+# staging directory, so this stays a host-level step that runs once no matter
+# how many runners the host gets.
+
+- name: Create a scratch directory for the dependency installer
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: gha-deps
+  become: true
+  register: gha_deps_tmp
+
+- name: Unpack the dependency installer
+  ansible.builtin.unarchive:
+    src: "{{ gha_runner_archive_path }}"
+    dest: "{{ gha_deps_tmp.path }}"
+    remote_src: true
+    include:
+      - ./bin/installdependencies.sh
+    # Unpacking as root would otherwise restore the uid GitHub happened to build
+    # the tarball under.
+    extra_opts:
+      - --no-same-owner
+    mode: "0755"
+  become: true
+
+# Reports changed unconditionally: the script prints what it did but does not
+# distinguish "installed" from "already present" in its exit status.
+- name: Install the runner's native dependencies
+  ansible.builtin.command:
+    cmd: ./bin/installdependencies.sh
+    chdir: "{{ gha_deps_tmp.path }}"
+  become: true
+  changed_when: true
+
+- name: Remove the scratch directory
+  ansible.builtin.file:
+    path: "{{ gha_deps_tmp.path }}"
+    state: absent
+  become: true

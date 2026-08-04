@@ -1,0 +1,47 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: |
+          pip install ansible-core ansible-lint
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+
+      - name: ansible-lint
+        env:
+          ANSIBLE_COLLECTIONS_PATH: ./collections
+        run: ansible-lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+
+      # rollback.yml downloads the real runner tarball but never registers
+      # anything with GitHub, so no token is needed.
+      - name: Run the role's checks
+        run: ./tests/run.sh

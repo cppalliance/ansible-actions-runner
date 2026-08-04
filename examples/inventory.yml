@@ -1,0 +1,29 @@
+---
+all:
+  children:
+    gha_linux:
+      hosts:
+        build-linux-1:
+          ansible_host: 10.0.0.11
+        build-linux-2:
+          ansible_host: 10.0.0.12
+      vars:
+        ansible_user: admin
+
+    gha_macos:
+      hosts:
+        build-mac-1:
+          ansible_host: 10.0.0.21
+      vars:
+        ansible_user: admin
+
+    gha_windows:
+      hosts:
+        build-win-1:
+          ansible_host: 10.0.0.31
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_winrm_transport: ntlm
+        ansible_port: 5986
+        ansible_winrm_server_cert_validation: ignore

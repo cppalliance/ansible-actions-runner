@@ -1,0 +1,44 @@
+---
+galaxy_info:
+  role_name: github_actions_runner
+  namespace: cppalliance
+  author: sdarwin
+  description: >-
+    Install multiple GitHub Actions self-hosted runners per host from a
+    host_vars list, on Linux, macOS and Windows. Never modifies a runner it did
+    not just create. Uses a LaunchDaemon on macOS so runners start at boot
+    without a GUI login.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+        - noble
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+    - name: Fedora
+      versions:
+        - all
+    - name: MacOSX
+      versions:
+        - all
+    - name: Windows
+      versions:
+        - all
+  galaxy_tags:
+    - github
+    - actions
+    - ci
+    - runner
+    - selfhosted
+    - launchd
+
+dependencies: []

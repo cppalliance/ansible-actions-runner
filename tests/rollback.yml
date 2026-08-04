@@ -1,0 +1,111 @@
+---
+# Exercises the real Linux install path against localhost, with a deliberately
+# invalid token so that registration fails. Verifies that the staging
+# directory, the rescue block and the rollback leave nothing behind, which is
+# the invariant the whole "skip if the directory exists" design rests on.
+#
+# Downloads the real runner tarball, so it needs network access. It never
+# registers anything with GitHub.
+#
+# Run it through tests/run.sh, which sets the role path and, when running as
+# root, swaps sudo for tests/become-shim.sh.
+
+- name: Check that a failed install rolls itself back
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    ansible_user: "{{ lookup('pipe', 'id -un') }}"
+    gha_sandbox: "{{ playbook_dir }}/../.cache/sandbox"
+    gha_github_token: invalid-token-so-registration-must-fail
+    # Pinned so that preflight does not call the releases API, which would fail
+    # on the bad token before the install path is ever reached.
+    gha_runner_version: "2.336.0"
+    gha_runner_user: "{{ ansible_facts['user_id'] }}"
+    gha_runner_group: "{{ ansible_facts['user_gid'] }}"
+    gha_runner_manage_user: false
+    # Emphatically not renaming the machine running the test suite.
+    gha_set_hostname: false
+    # The test runs unprivileged against a sandbox directory, so it can neither
+    # install packages nor run the dependency script, and needs neither to
+    # reach the registration failure it is here to provoke.
+    gha_runner_packages: []
+    gha_runner_install_dependencies: false
+    gha_runner_home: "{{ gha_sandbox }}"
+    gha_runners_dir: "{{ gha_sandbox }}/runners"
+    gha_runner_install_as_service: false
+    gha_hide_sensitive_logs: false
+    gha_runners:
+      - repo: boostorg/boost
+
+  tasks:
+    - name: Start from an empty sandbox
+      ansible.builtin.file:
+        path: "{{ gha_sandbox }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop:
+        - absent
+        - directory
+
+    - name: Run the role and expect it to fail at registration
+      block:
+        - name: Invoke the role
+          ansible.builtin.include_role:
+            name: Ansible-Actions-Runner
+
+        - name: The role should not have succeeded
+          ansible.builtin.fail:
+            msg: >-
+              The role reported success even though the GitHub token was
+              invalid. The rescue path is not being reached.
+      rescue:
+        - name: Note the expected failure
+          ansible.builtin.debug:
+            msg: "Registration failed as expected; checking the rollback."
+
+    # Guards against the test passing for the wrong reason: if the role had
+    # bailed out during preflight, none of this would exist and an "empty
+    # directory" assertion would succeed vacuously.
+    - name: Confirm the runners directory was created
+      ansible.builtin.stat:
+        path: "{{ gha_sandbox }}/runners"
+      register: gha_runners_dir_stat
+
+    - name: Confirm the runner tarball was downloaded
+      ansible.builtin.find:
+        paths: /tmp
+        patterns: "actions-runner-linux-*-{{ gha_runner_version }}.tar.gz"
+      register: gha_tarball
+
+    - name: The run must have reached the download stage for this test to mean anything
+      ansible.builtin.assert:
+        that:
+          - gha_runners_dir_stat.stat.exists
+          - gha_runners_dir_stat.stat.isdir
+          - gha_tarball.files | length > 0
+        fail_msg: >-
+          The role failed before it got as far as downloading, so this run
+          proves nothing about the rollback. Check the task that failed above.
+
+    - name: Inspect what survived in the runners directory
+      ansible.builtin.find:
+        paths: "{{ gha_sandbox }}/runners"
+        file_type: any
+        hidden: true
+      register: gha_leftovers
+
+    - name: The rollback should have removed both the real and staging directories
+      ansible.builtin.assert:
+        that:
+          - gha_leftovers.files | length == 0
+        fail_msg: >-
+          Rollback left files behind:
+          {{ gha_leftovers.files | map(attribute='path') | list }}.
+          A leftover runner directory would be skipped forever on the next run.
+        success_msg: "Rollback left the runners directory empty, as intended."
+
+    - name: Clean up the sandbox
+      ansible.builtin.file:
+        path: "{{ gha_sandbox }}"
+        state: absent

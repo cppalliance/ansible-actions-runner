@@ -1,0 +1,166 @@
+---
+# The list of runners to install on a host. Normally set per machine in
+# host_vars/<hostname>.yml. Each entry is a dict; only `repo` is required.
+#
+#   gha_runners:
+#     - repo: boostorg/boost
+#     - repo: boostorg/boost
+#       labels: [big-memory]
+#     - repo: boostorg/release-tools
+#       suffix: nightly
+#       install_as_service: false
+#
+# Recognised keys per entry:
+#   repo               "owner/name" (required)
+#   suffix             directory/name suffix; defaults to the 1-based ordinal
+#                      of this entry among entries for the same repo
+#   labels             list of labels; defaults to gha_runner_default_labels
+#   name               registered runner name; defaults to <hostname>_<suffix>
+#   install_as_service defaults to gha_runner_install_as_service
+#   work_dir           defaults to gha_runner_work_dir
+#   no_default_labels  defaults to gha_runner_no_default_labels
+#   extra_config_args  extra flags appended to config.sh/config.cmd
+gha_runners: []
+
+# Unprivileged account that owns and runs the runners.
+gha_runner_user: gha
+
+# Primary group for the runner files. Empty means "same as the user" on Linux
+# and "staff" on macOS.
+gha_runner_group: ""
+
+# Create gha_runner_user if it is missing. Set to false if the account is
+# provisioned elsewhere (directory service, image build, another role).
+gha_runner_manage_user: true
+
+# Home directory of gha_runner_user. Empty means "detect it on the host".
+gha_runner_home: ""
+
+# Parent directory holding one subdirectory per runner. Empty means
+# <home>/runners on Linux and macOS.
+gha_runners_dir: ""
+
+# Parent directory on Windows. GitHub recommends a path off the drive root so
+# that Windows system accounts can reach it.
+gha_runners_dir_windows: 'C:\actions-runner'
+
+# "latest" resolves against the GitHub releases API once per play. Pin to an
+# exact version ("2.336.0") to freeze it.
+gha_runner_version: latest
+
+# Where the runner tarballs come from. Change only to use a fork.
+gha_runner_download_repository: actions/runner
+
+# Labels applied when an entry does not specify its own. GitHub always adds
+# self-hosted plus the OS and architecture labels on top of these.
+gha_runner_default_labels: []
+
+# Suppress GitHub's automatic self-hosted/OS/arch labels. Requires at least one
+# explicit label.
+gha_runner_no_default_labels: false
+
+# Install and start each runner as a system service.
+gha_runner_install_as_service: true
+
+# Runner working directory, relative to the runner's own directory.
+gha_runner_work_dir: _work
+
+# Extra flags appended to config.sh/config.cmd, e.g. "--ephemeral".
+gha_runner_extra_config_args: ""
+
+gha_github_url: https://github.com
+gha_github_api_url: https://api.github.com
+
+# Page size when listing a repository's runners to verify a registration.
+gha_github_api_runners_per_page: 100
+
+# After installing, ask GitHub whether the runner actually shows up under the
+# repository. A service can start cleanly and still never register, and this is
+# the only check that catches it. A failure here triggers the same rollback as
+# any other install failure.
+gha_verify_registration: true
+
+# Token used ONLY on the Ansible control node, to mint short-lived registration
+# tokens. It is never copied to the target host. Needs `repo` scope on a
+# classic PAT, or "Administration: read & write" on a fine-grained PAT.
+gha_github_token: "{{ lookup('env', 'GITHUB_TOKEN') }}"
+
+# Suppress task output that would otherwise echo a registration token.
+gha_hide_sensitive_logs: true
+
+# On failure partway through an install, unregister the half-built runner and
+# delete its directory, so a leftover directory never means "broken but
+# skipped forever". Set to false to leave the wreckage in place for debugging.
+gha_cleanup_on_failure: true
+
+# --- Hostname ------------------------------------------------------------
+
+# Rename the machine to match its inventory entry before installing anything.
+#
+# Runners are identified in the GitHub UI by machine name, so a fleet of hosts
+# still called "ubuntu" or "localhost" is unusable in practice. The inventory
+# already carries the intended name, so this takes it from there.
+gha_set_hostname: true
+
+# The short name to apply. inventory_hostname_short is inventory_hostname up to
+# the first dot.
+gha_hostname: "{{ inventory_hostname_short }}"
+
+# The fully qualified name, applied on platforms that keep it separately from
+# the short name. Empty means "the inventory entry is not a domain name, so
+# only set the short name".
+gha_hostname_fqdn: "{{ inventory_hostname if '.' in inventory_hostname else '' }}"
+
+# --- Linux ---------------------------------------------------------------
+
+# Packages installed on the host before anything else happens.
+#
+# `acl` is needed by Ansible itself, not by the runner: this role becomes an
+# unprivileged user to run config.sh, and an unprivileged-to-unprivileged
+# become is only possible if setfacl can hand over the temp files.
+#
+# The runner's own .NET dependencies are deliberately not listed here, because
+# their names are version-stamped and differ per release (libicu72, libicu74,
+# libssl3t64 ...). gha_runner_install_dependencies handles those instead.
+gha_runner_packages:
+  - acl
+
+# Run the runner's bundled bin/installdependencies.sh once per host before
+# registering anything.
+#
+# The runner is a .NET program, and while the tarball ships the .NET runtime it
+# does not ship the native libraries that runtime links against — ICU above
+# all. Without them config.sh aborts with "Libicu's dependencies is missing for
+# Dotnet Core 6.0". GitHub's script knows the right package name for each
+# distro and release, which is why the role calls it instead of guessing.
+#
+# Set to false if the host image already provides them, and add whatever you
+# need to gha_runner_packages by hand.
+gha_runner_install_dependencies: true
+
+# --- macOS ---------------------------------------------------------------
+
+# Install a LaunchDaemon in /Library/LaunchDaemons instead of the per-user
+# LaunchAgent that `svc.sh install` creates. The daemon starts at boot with no
+# GUI login, which is the whole point.
+# See https://github.com/actions/runner/issues/1056
+gha_macos_use_launch_daemon: true
+
+# "bootstrap" uses `launchctl bootstrap system`, the modern form. "load" uses
+# the older `launchctl load -w`. bootstrap falls back to load automatically.
+gha_macos_launchctl_method: bootstrap
+
+# ProcessType Interactive lifts launchd's CPU/IO throttling but is reported to
+# break some headless setups. GitHub's LaunchAgent template sets it; the
+# LaunchDaemon recipes in issue 1056 leave it out.
+gha_macos_process_type_interactive: false
+
+# --- Windows -------------------------------------------------------------
+
+# Account the Windows service logs on as. The default needs no password.
+gha_windows_logon_account: 'NT AUTHORITY\NETWORK SERVICE'
+
+# Only needed for a real user account. Passed via the
+# ACTIONS_RUNNER_INPUT_WINDOWSLOGONPASSWORD environment variable rather than on
+# the command line, so passwords with shell metacharacters survive intact.
+gha_windows_logon_password: ""

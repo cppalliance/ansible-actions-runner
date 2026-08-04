@@ -1,0 +1,133 @@
+---
+- name: "Compute the paths for {{ runner.dirname }}"
+  ansible.builtin.set_fact:
+    gha_runner_staging_path: "{{ gha_runners_path }}/{{ gha_staging_prefix }}{{ runner.dirname }}{{ gha_staging_suffix }}"
+    gha_runner_final_path: "{{ gha_runners_path }}/{{ runner.dirname }}"
+
+# Everything up to and including registration happens under a dotted staging
+# name. Only once the runner is configured does the directory get its real
+# name. Combined with the rescue below, that keeps the invariant this role
+# relies on: if <runners_dir>/<name> exists, it is a finished runner.
+- name: "Install runner {{ runner.dirname }}"
+  block:
+    - name: "Clear any staging directory left by an earlier failed run of {{ runner.dirname }}"
+      ansible.builtin.file:
+        path: "{{ gha_runner_staging_path }}"
+        state: absent
+      become: true
+
+    - name: "Create the staging directory for {{ runner.dirname }}"
+      ansible.builtin.file:
+        path: "{{ gha_runner_staging_path }}"
+        state: directory
+        owner: "{{ gha_runner_user }}"
+        group: "{{ gha_runner_group_resolved }}"
+        mode: "0755"
+      become: true
+
+    # Not ansible.builtin.unarchive. That module shells out to tar and refuses
+    # anything that is not GNU tar, so on macOS — whose /usr/bin/tar is bsdtar —
+    # it fails outright. Upstream closed that as won't-fix, because the module's
+    # change detection is built on GNU tar's --diff and they will not carry a
+    # second implementation: https://github.com/ansible/ansible/issues/75441
+    #
+    # Calling tar directly costs nothing here. The only thing the module adds is
+    # that change detection, which is meaningless when the destination was
+    # created empty two tasks ago. Every flag below is common to both tars.
+    - name: "Unpack the runner for {{ runner.dirname }}" # noqa: command-instead-of-module
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --extract
+          - --gzip
+          - --no-same-owner
+          - --file
+          - "{{ gha_runner_archive_path }}"
+          - --directory
+          - "{{ gha_runner_staging_path }}"
+        creates: "{{ gha_runner_staging_path }}/config.sh"
+      become: true
+
+    # chown rather than the file module's recurse, because the runner tarball
+    # holds over eleven thousand files and the module would set attributes on
+    # each one individually from Python.
+    - name: "Give {{ gha_runner_user }} ownership of {{ runner.dirname }}"
+      ansible.builtin.command:
+        argv:
+          - chown
+          - -R
+          - "{{ gha_runner_user }}:{{ gha_runner_group_resolved }}"
+          - "{{ gha_runner_staging_path }}"
+      become: true
+      changed_when: true
+
+    # Minted on the control node and valid for one hour. The long-lived PAT
+    # never leaves the control node; only this short-lived token is sent to the
+    # target host.
+    - name: "Mint a registration token for {{ runner.repo }}"
+      ansible.builtin.uri:
+        url: "{{ gha_github_api_url }}/repos/{{ runner.repo }}/actions/runners/registration-token"
+        method: POST
+        headers:
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+          Authorization: "Bearer {{ gha_github_token }}"
+        body_format: json
+        status_code: 201
+      register: gha_registration
+      delegate_to: localhost
+      become: false
+      no_log: "{{ gha_hide_sensitive_logs | bool }}"
+
+    - name: "Register {{ runner.runner_name }} with {{ runner.repo }}"
+      ansible.builtin.command:
+        argv: "{{ _gha_config_argv }}"
+        chdir: "{{ gha_runner_staging_path }}"
+      become: true
+      become_user: "{{ gha_runner_user }}"
+      changed_when: true
+      no_log: "{{ gha_hide_sensitive_logs | bool }}"
+      vars:
+        _gha_config_argv: >-
+          {{ ['./config.sh', '--unattended',
+              '--url', gha_github_url ~ '/' ~ runner.repo,
+              '--token', gha_registration.json.token,
+              '--name', runner.runner_name,
+              '--work', runner.work_dir]
+             + (['--labels', runner.labels | join(',')] if runner.labels | length > 0 else [])
+             + (['--no-default-labels'] if runner.no_default_labels | bool else [])
+             + (runner.extra_config_args.split() if runner.extra_config_args | trim | length > 0 else []) }}
+
+    - name: "Move {{ runner.dirname }} into place"
+      ansible.builtin.command:
+        argv:
+          - /bin/mv
+          - "{{ gha_runner_staging_path }}"
+          - "{{ gha_runner_final_path }}"
+        creates: "{{ gha_runner_final_path }}"
+      become: true
+
+    # svc.sh reads RUNNER_ROOT from the working directory, so the service must
+    # be installed after the move or it would point at the staging path.
+    - name: "Install the service for {{ runner.dirname }}"
+      ansible.builtin.include_tasks:
+        file: "service_{{ 'macos' if gha_runner_os == 'osx' else 'linux' }}.yml"
+      when: runner.install_as_service | bool
+
+    - name: "Confirm {{ runner.dirname }} registered with GitHub"
+      ansible.builtin.include_tasks: verify_registration.yml
+      when: gha_verify_registration | bool
+
+  rescue:
+    - name: "Roll back the failed install of {{ runner.dirname }}"
+      ansible.builtin.include_tasks: cleanup_unix.yml
+      when: gha_cleanup_on_failure | bool
+
+    - name: "Fail after handling {{ runner.dirname }}"
+      ansible.builtin.fail:
+        msg: >-
+          Failed to install runner {{ runner.dirname }} for {{ runner.repo }}.
+          {{ 'The partial install was rolled back, so re-running this play will retry it.'
+             if gha_cleanup_on_failure | bool
+             else 'gha_cleanup_on_failure is false, so the partial install was left in place at '
+                  ~ gha_runner_final_path ~ ' (or its .staging directory) for inspection.' }}

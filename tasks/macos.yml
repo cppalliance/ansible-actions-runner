@@ -1,0 +1,43 @@
+---
+- name: Ensure the runner user exists
+  ansible.builtin.user:
+    name: "{{ gha_runner_user }}"
+    shell: /bin/bash
+    state: present
+  become: true
+  when: gha_runner_manage_user | bool
+
+# macOS has no getent, so read the home directory out of the directory service.
+- name: Read the runner user's home directory
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dscl
+      - "."
+      - -read
+      - "/Users/{{ gha_runner_user }}"
+      - NFSHomeDirectory
+  register: gha_runner_dscl_home
+  changed_when: false
+  when: gha_runner_home | length == 0
+
+- name: Resolve the runner paths
+  ansible.builtin.set_fact:
+    gha_runner_home_path: "{{ _gha_home }}"
+    gha_runner_group_resolved: "{{ gha_runner_group | default('staff', true) }}"
+    gha_runners_path: "{{ gha_runners_dir if gha_runners_dir | length > 0 else _gha_home ~ '/runners' }}"
+  vars:
+    _gha_home: >-
+      {{ gha_runner_home if gha_runner_home | length > 0
+         else gha_runner_dscl_home.stdout | regex_replace('^NFSHomeDirectory:\s*', '') | trim }}
+
+- name: Ensure the runners parent directory exists
+  ansible.builtin.file:
+    path: "{{ gha_runners_path }}"
+    state: directory
+    owner: "{{ gha_runner_user }}"
+    group: "{{ gha_runner_group_resolved }}"
+    mode: "0755"
+  become: true
+
+- name: Include the shared install flow
+  ansible.builtin.include_tasks: install_unix.yml

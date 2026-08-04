@@ -1,0 +1,24 @@
+---
+# Debian's convention is to resolve the machine's own name through 127.0.1.1
+# rather than 127.0.0.1, so that `hostname -f` answers on a host whose routable
+# address comes from DHCP. Distributions that do not follow the convention
+# ignore the extra line, and it makes the FQDN resolvable there too.
+- name: Map the hostname to 127.0.1.1 in /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ _gha_hosts_names | join(' ') }}"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  vars:
+    # Listing the short name twice when there is no domain would be harmless but
+    # looks like a bug to whoever reads the file next.
+    _gha_hosts_names: >-
+      {{ ([gha_hostname_fqdn] if gha_hostname_fqdn | length > 0 else []) + [gha_hostname] }}
+
+- name: Set the hostname
+  ansible.builtin.hostname:
+    name: "{{ gha_hostname }}"
+  become: true

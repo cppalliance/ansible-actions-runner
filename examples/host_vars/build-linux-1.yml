@@ -1,0 +1,27 @@
+---
+# Two runners for boostorg/boost plus one for boostorg/release-tools.
+#
+# The first two get auto-numbered suffixes because they share a repo, so they
+# land in:
+#
+#   /home/gha/runners/boostorg_boost_1
+#   /home/gha/runners/boostorg_boost_2
+#   /home/gha/runners/boostorg_release-tools_nightly
+#
+# and register with GitHub as build-linux-1_1, build-linux-1_2 and
+# build-linux-1_nightly.
+
+gha_runners:
+  - repo: boostorg/boost
+
+  - repo: boostorg/boost
+    labels:
+      - linux
+      - x64
+      - big-memory
+
+  - repo: boostorg/release-tools
+    suffix: nightly
+    labels:
+      - linux
+      - release-tools

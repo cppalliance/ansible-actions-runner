@@ -1,0 +1,131 @@
+---
+- name: Assert that this platform is supported
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['system'] in gha_runner_os_map
+      - ansible_facts['architecture'] in gha_runner_arch_map
+    fail_msg: >-
+      No GitHub Actions runner build exists for system
+      '{{ ansible_facts['system'] }}' on architecture
+      '{{ ansible_facts['architecture'] }}'.
+    quiet: true
+
+- name: Assert that a GitHub token is available on the control node
+  ansible.builtin.assert:
+    that:
+      - gha_github_token | default('', true) | length > 0
+    fail_msg: >-
+      gha_github_token is empty. Export GITHUB_TOKEN on the Ansible control
+      node, or set gha_github_token from a vault. It needs `repo` scope on a
+      classic PAT, or "Administration: read & write" on a fine-grained PAT.
+      The token stays on the control node; only the short-lived registration
+      token it mints is sent to the target host.
+    quiet: true
+  when: gha_runners | length > 0
+
+- name: Assert that every runner definition names a repository
+  ansible.builtin.assert:
+    that:
+      - item.repo is defined
+      - item.repo is string
+      - item.repo.split('/') | length == 2
+      - item.repo.split('/')[0] | length > 0
+      - item.repo.split('/')[1] | length > 0
+    fail_msg: "Each gha_runners entry needs repo: '<owner>/<name>'. Got: {{ item }}"
+    quiet: true
+  loop: "{{ gha_runners }}"
+  loop_control:
+    label: "{{ item.repo | default(item) }}"
+
+# Runner names follow the name the machine is going to have, not the one it
+# currently reports. With gha_set_hostname the two differ for the rest of the
+# play, because the facts were gathered before the rename — and on Windows they
+# differ until the next reboot.
+- name: Decide the machine name that runners register under
+  ansible.builtin.set_fact:
+    gha_machine_name: "{{ gha_hostname if gha_set_hostname | bool else ansible_facts['hostname'] }}"
+
+- name: Start with an empty normalized runner list
+  ansible.builtin.set_fact:
+    gha_runners_normalized: []
+
+# Builds up gha_runners_normalized one entry at a time so that each entry can
+# see the ones before it. That is what makes the default suffix work: it is the
+# count of already-normalized entries for the same repo, plus one.
+- name: Normalize the runner definitions
+  ansible.builtin.set_fact:
+    gha_runners_normalized: "{{ gha_runners_normalized + [_gha_entry] }}"
+  vars:
+    _gha_owner: "{{ item.repo.split('/')[0] }}"
+    _gha_repo: "{{ item.repo.split('/')[1] }}"
+    _gha_ordinal: "{{ gha_runners_normalized | selectattr('repo', 'equalto', item.repo) | list | length + 1 }}"
+    _gha_suffix: "{{ item.suffix | default(_gha_ordinal, true) }}"
+    _gha_entry:
+      repo: "{{ item.repo }}"
+      owner: "{{ _gha_owner }}"
+      repo_name: "{{ _gha_repo }}"
+      suffix: "{{ _gha_suffix }}"
+      dirname: "{{ _gha_owner }}_{{ _gha_repo }}_{{ _gha_suffix }}"
+      runner_name: "{{ item.name | default(gha_machine_name ~ '_' ~ _gha_suffix, true) }}"
+      labels: "{{ item.labels | default(gha_runner_default_labels, true) }}"
+      no_default_labels: "{{ item.no_default_labels | default(gha_runner_no_default_labels) }}"
+      install_as_service: "{{ item.install_as_service | default(gha_runner_install_as_service) }}"
+      work_dir: "{{ item.work_dir | default(gha_runner_work_dir, true) }}"
+      extra_config_args: "{{ item.extra_config_args | default(gha_runner_extra_config_args, true) }}"
+  loop: "{{ gha_runners }}"
+  loop_control:
+    label: "{{ item.repo }}"
+
+- name: Assert that no two runners resolve to the same directory
+  ansible.builtin.assert:
+    that:
+      - gha_runners_normalized | map(attribute='dirname') | list | unique | length
+        == gha_runners_normalized | length
+    fail_msg: >-
+      Two gha_runners entries resolve to the same directory name
+      ({{ gha_runners_normalized | map(attribute='dirname') | list | sort | join(', ') }}).
+      This usually means an explicit `suffix` collides with an auto-numbered one.
+    quiet: true
+
+- name: Assert that runners suppressing the default labels define their own
+  ansible.builtin.assert:
+    that:
+      - not (item.no_default_labels | bool) or item.labels | length > 0
+    fail_msg: >-
+      Runner {{ item.dirname }} sets no_default_labels but has no labels of its
+      own, so no workflow could ever target it.
+    quiet: true
+  loop: "{{ gha_runners_normalized }}"
+  loop_control:
+    label: "{{ item.dirname }}"
+
+- name: Look up the latest runner release
+  ansible.builtin.uri:
+    url: "{{ gha_github_api_url }}/repos/{{ gha_runner_download_repository }}/releases/latest"
+    method: GET
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+      Authorization: "Bearer {{ gha_github_token }}"
+    body_format: json
+    status_code: 200
+  register: gha_runner_latest_release
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when:
+    - gha_runners | length > 0
+    - gha_runner_version == 'latest'
+
+- name: Record the runner version to install
+  ansible.builtin.set_fact:
+    gha_runner_resolved_version: >-
+      {{ (gha_runner_latest_release.json.tag_name if gha_runner_version == 'latest' else gha_runner_version)
+         | regex_replace('^v', '') }}
+  when: gha_runners | length > 0
+
+- name: Report the runner version to install
+  ansible.builtin.debug:
+    msg: "Installing GitHub Actions runner {{ gha_runner_resolved_version }} ({{ gha_runner_os }}-{{ gha_runner_arch }})"
+  when: gha_runners | length > 0

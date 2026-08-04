@@ -1,0 +1,44 @@
+---
+- name: Check which runner directories already exist
+  ansible.builtin.stat:
+    path: "{{ gha_runners_path }}/{{ item.dirname }}"
+  loop: "{{ gha_runners_normalized }}"
+  loop_control:
+    label: "{{ item.dirname }}"
+  register: gha_runner_dir_stat
+
+# An existing directory is left completely alone. That is deliberate: this role
+# never touches a runner it did not just create, so a bad run cannot disturb a
+# working runner. Reinstalling means deleting the directory by hand first.
+- name: Split the runners into pending and already-installed
+  ansible.builtin.set_fact:
+    gha_runners_pending: "{{ gha_runner_dir_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}"
+    gha_runners_present: "{{ gha_runner_dir_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+
+- name: Report the runners left untouched
+  ansible.builtin.debug:
+    msg: >-
+      Skipping {{ gha_runners_present | map(attribute='dirname') | join(', ') }}
+      — directory already present. Delete it by hand to force a reinstall.
+  when: gha_runners_present | length > 0
+
+- name: Download the runner archive
+  ansible.builtin.get_url:
+    url: "{{ gha_runner_archive_url }}"
+    dest: "{{ gha_runner_archive_path }}"
+    mode: "0644"
+  when: gha_runners_pending | length > 0
+
+- name: Install the runner's native dependencies
+  ansible.builtin.include_tasks: dependencies_linux.yml
+  when:
+    - gha_runners_pending | length > 0
+    - gha_runner_os == 'linux'
+    - gha_runner_install_dependencies | bool
+
+- name: Install each pending runner
+  ansible.builtin.include_tasks: install_unix_runner.yml
+  loop: "{{ gha_runners_pending }}"
+  loop_control:
+    loop_var: runner
+    label: "{{ runner.dirname }}"

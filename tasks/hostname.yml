@@ -1,0 +1,24 @@
+---
+# Renaming a machine is the one thing in this role that affects the host beyond
+# the runners themselves, so the name is checked before anything is applied.
+
+# This doubles as the check for an inventory addressed by IP. Ansible leaves an
+# address intact in inventory_hostname_short — "10.0.0.5" does not become "10" —
+# so an address arrives here still carrying its dots or colons, and a single
+# label rule rejects both it and any other name the platforms would choke on.
+- name: Assert that the hostname to apply is a valid one
+  ansible.builtin.assert:
+    that:
+      - gha_hostname | length > 0
+      - gha_hostname is match('^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$')
+    fail_msg: >-
+      gha_set_hostname is on, but '{{ gha_hostname }}' is not a usable hostname.
+      It must be 1-63 characters of letters, digits and hyphens, and may not
+      begin or end with a hyphen. An inventory that addresses this host by IP
+      has no name to derive: set gha_hostname explicitly, or set
+      gha_set_hostname to false.
+    quiet: true
+
+- name: Apply the hostname for this platform
+  ansible.builtin.include_tasks:
+    file: "{{ gha_hostname_tasks_map[ansible_facts['system']] }}"

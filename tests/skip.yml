@@ -1,0 +1,98 @@
+---
+# Checks the central promise of this role: a runner directory that already
+# exists is not touched, inspected, restarted or re-registered. Nothing is
+# downloaded either, because there is nothing to install.
+#
+# Offline. Run it through tests/run.sh.
+
+- name: Check that existing runners are left alone
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    ansible_user: "{{ lookup('pipe', 'id -un') }}"
+    gha_sandbox: "{{ playbook_dir }}/../.cache/sandbox-skip"
+    gha_github_token: invalid-token-that-must-never-be-used
+    gha_runner_version: "2.336.0"
+    gha_runner_user: "{{ ansible_facts['user_id'] }}"
+    gha_runner_group: "{{ ansible_facts['user_gid'] }}"
+    gha_runner_manage_user: false
+    # Emphatically not renaming the machine running the test suite.
+    gha_set_hostname: false
+    # As in rollback.yml: unprivileged sandbox, no package management possible
+    # and none needed.
+    gha_runner_packages: []
+    gha_runner_install_dependencies: false
+    gha_runner_home: "{{ gha_sandbox }}"
+    gha_runners_dir: "{{ gha_sandbox }}/runners"
+    gha_runners:
+      - repo: boostorg/boost
+      - repo: boostorg/boost
+
+  tasks:
+    - name: Start from an empty sandbox
+      ansible.builtin.file:
+        path: "{{ gha_sandbox }}/runners"
+        state: "{{ item }}"
+        mode: "0755"
+      loop:
+        - absent
+        - directory
+
+    # Stands in for a runner that is already installed and, as far as this role
+    # is concerned, running jobs right now.
+    - name: Create the directory of the pretend runner
+      ansible.builtin.file:
+        path: "{{ gha_sandbox }}/runners/boostorg_boost_1"
+        state: directory
+        mode: "0755"
+
+    - name: Pretend boostorg_boost_1 is already installed
+      ansible.builtin.copy:
+        content: "a real runner lives here\n"
+        dest: "{{ gha_sandbox }}/runners/boostorg_boost_1/{{ item }}"
+        mode: "0644"
+      loop:
+        - .credentials
+        - .runner
+
+    - name: Run the role, expecting only the second runner to be attempted
+      block:
+        - name: Invoke the role
+          ansible.builtin.include_role:
+            name: Ansible-Actions-Runner
+      rescue:
+        - name: The second runner fails on the bad token, which is expected
+          ansible.builtin.debug:
+            msg: "boostorg_boost_2 failed to register, as expected."
+
+    - name: Re-read the pre-existing runner
+      ansible.builtin.slurp:
+        src: "{{ gha_sandbox }}/runners/boostorg_boost_1/.credentials"
+      register: gha_untouched
+
+    - name: The pre-existing runner must be byte-for-byte unchanged
+      ansible.builtin.assert:
+        that:
+          - (gha_untouched.content | b64decode) == "a real runner lives here\n"
+        fail_msg: "The role modified a runner directory that already existed."
+        success_msg: "The pre-existing runner was left untouched."
+
+    - name: Only the pre-existing runner should remain
+      ansible.builtin.find:
+        paths: "{{ gha_sandbox }}/runners"
+        file_type: directory
+        hidden: true
+        recurse: false
+      register: gha_dirs
+
+    - name: The failed second runner must not have left a directory behind
+      ansible.builtin.assert:
+        that:
+          - gha_dirs.files | map(attribute='path') | map('basename') | list == ['boostorg_boost_1']
+        fail_msg: "Unexpected directories: {{ gha_dirs.files | map(attribute='path') | list }}"
+
+    - name: Clean up the sandbox
+      ansible.builtin.file:
+        path: "{{ gha_sandbox }}"
+        state: absent

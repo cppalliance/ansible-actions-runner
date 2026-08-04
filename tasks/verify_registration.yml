@@ -1,0 +1,41 @@
+---
+# A running service is not proof of a working runner: it can come up happily
+# and still never appear in the repository. This asks GitHub directly.
+#
+# Presence in the list is the test, not status, because a runner installed with
+# install_as_service false is legitimately registered but offline.
+
+- name: "Confirm GitHub lists {{ runner.runner_name }} under {{ runner.repo }}"
+  ansible.builtin.uri:
+    url: "{{ gha_github_api_url }}/repos/{{ runner.repo }}/actions/runners?per_page={{ gha_github_api_runners_per_page }}"
+    method: GET
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+      Authorization: "Bearer {{ gha_github_token }}"
+    body_format: json
+    status_code: 200
+  register: gha_registered_check
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  no_log: "{{ gha_hide_sensitive_logs | bool }}"
+  retries: 5
+  delay: 3
+  until:
+    - gha_registered_check.json is defined
+    - runner.runner_name in (gha_registered_check.json.runners | default([]) | map(attribute='name') | list)
+  failed_when: false
+
+# Split out from the task above so the failure message can name the runner
+# without no_log censoring the whole result.
+- name: "Fail if {{ runner.runner_name }} never appeared in {{ runner.repo }}"
+  ansible.builtin.assert:
+    that:
+      - runner.runner_name in (gha_registered_check.json.runners | default([]) | map(attribute='name') | list)
+    fail_msg: >-
+      config.sh reported success but GitHub does not list a runner named
+      '{{ runner.runner_name }}' under {{ runner.repo }}. Registration did not
+      take effect, so the install is being rolled back. Set
+      gha_verify_registration to false to skip this check.
+    quiet: true

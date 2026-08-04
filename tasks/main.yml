@@ -1,0 +1,19 @@
+---
+- name: Validate and normalize the runner definitions
+  ansible.builtin.include_tasks: preflight.yml
+
+- name: Configure the machine hostname
+  ansible.builtin.include_tasks: hostname.yml
+  when: gha_set_hostname | bool
+
+- name: Install runners on Linux
+  ansible.builtin.include_tasks: linux.yml
+  when: ansible_facts['system'] == 'Linux'
+
+- name: Install runners on macOS
+  ansible.builtin.include_tasks: macos.yml
+  when: ansible_facts['system'] == 'Darwin'
+
+- name: Install runners on Windows
+  ansible.builtin.include_tasks: windows.yml
+  when: ansible_facts['system'] == 'Win32NT'

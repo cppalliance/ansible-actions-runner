@@ -1,0 +1,25 @@
+---
+# macOS runners install as LaunchDaemons in /Library/LaunchDaemons, so they
+# come up at boot over SSH with nobody logged into the GUI. That is the whole
+# reason this role does not call `svc.sh install` on macOS.
+#
+#   /Users/gha/runners/boostorg_boost_1
+#   /Users/gha/runners/boostorg_boost_2
+
+gha_runners:
+  - repo: boostorg/boost
+    labels:
+      - macos
+      - arm64
+
+  - repo: boostorg/boost
+    labels:
+      - macos
+      - arm64
+      - xcode
+
+  # Left out of the service manager entirely. Start it by hand with ./run.sh
+  # when you want it, which is handy while debugging a flaky toolchain.
+  - repo: boostorg/boost
+    suffix: manual
+    install_as_service: false

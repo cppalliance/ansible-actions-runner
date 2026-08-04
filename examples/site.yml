@@ -1,0 +1,24 @@
+---
+# Install the role first, e.g. with a requirements.yml containing:
+#
+#   roles:
+#     - name: sdarwin.github_actions_runner
+#       src: https://github.com/sdarwin/Ansible-Actions-Runner
+#       scm: git
+#
+#   ansible-galaxy install -r requirements.yml
+#
+# Then, with GITHUB_TOKEN exported on the control node (or gha_github_token
+# supplied from a vault):
+#
+#   ansible-playbook -i examples/inventory.yml examples/site.yml
+
+- name: Install GitHub Actions self-hosted runners
+  hosts: gha_linux:gha_macos:gha_windows
+  gather_facts: true
+  roles:
+    - role: sdarwin.github_actions_runner
+      # The runner list itself lives in host_vars. These are the knobs most
+      # deployments end up touching at the play level.
+      gha_runner_user: gha
+      gha_runner_version: latest

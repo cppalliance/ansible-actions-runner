@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Managed by the Ansible-Actions-Runner role. Manual edits will be lost if the
+  runner directory is deleted and reinstalled.
+
+  This is a LaunchDaemon rather than the LaunchAgent that `svc.sh install`
+  produces, so the runner starts at boot without a GUI login.
+  See https://github.com/actions/runner/issues/1056
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>{{ gha_macos_svc_name }}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>{{ gha_runner_final_path }}/runsvc.sh</string>
+    </array>
+    <key>UserName</key>
+    <string>{{ gha_runner_user }}</string>
+    <key>GroupName</key>
+    <string>{{ gha_runner_group_resolved }}</string>
+    <key>WorkingDirectory</key>
+    <string>{{ gha_runner_final_path }}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{{ gha_runner_home_path }}/Library/Logs/{{ gha_macos_svc_name }}/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{ gha_runner_home_path }}/Library/Logs/{{ gha_macos_svc_name }}/stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>ACTIONS_RUNNER_SVC</key>
+      <string>1</string>
+    </dict>
+{% if gha_macos_process_type_interactive | bool %}
+    <key>ProcessType</key>
+    <string>Interactive</string>
+{% endif %}
+    <key>SessionCreate</key>
+    <true/>
+  </dict>
+</plist>

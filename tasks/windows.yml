@@ -1,0 +1,58 @@
+---
+# Windows runners default to a path off the drive root rather than a user
+# profile, because the service logs on as NETWORK SERVICE by default and that
+# account cannot read another user's profile directory.
+- name: Resolve the runners parent directory
+  ansible.builtin.set_fact:
+    gha_runners_path: "{{ gha_runners_dir if gha_runners_dir | length > 0 else gha_runners_dir_windows }}"
+
+- name: Assert that a password was supplied for a named logon account
+  ansible.builtin.assert:
+    that:
+      - gha_windows_logon_password | length > 0
+    fail_msg: >-
+      gha_windows_logon_account is set to '{{ gha_windows_logon_account }}', which is a
+      real account, so gha_windows_logon_password must be set as well (vault it).
+      Built-in service accounts such as 'NT AUTHORITY\NETWORK SERVICE' need no password.
+    quiet: true
+  when:
+    - gha_runners | length > 0
+    - not gha_windows_logon_account.upper().startswith('NT AUTHORITY\\')
+
+- name: Ensure the runners parent directory exists
+  ansible.windows.win_file:
+    path: "{{ gha_runners_path }}"
+    state: directory
+
+- name: Check which runner directories already exist
+  ansible.windows.win_stat:
+    path: "{{ gha_runners_path }}\\{{ item.dirname }}"
+  loop: "{{ gha_runners_normalized }}"
+  loop_control:
+    label: "{{ item.dirname }}"
+  register: gha_runner_dir_stat
+
+- name: Split the runners into pending and already-installed
+  ansible.builtin.set_fact:
+    gha_runners_pending: "{{ gha_runner_dir_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}"
+    gha_runners_present: "{{ gha_runner_dir_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+
+- name: Report the runners left untouched
+  ansible.builtin.debug:
+    msg: >-
+      Skipping {{ gha_runners_present | map(attribute='dirname') | join(', ') }}
+      — directory already present. Delete it by hand to force a reinstall.
+  when: gha_runners_present | length > 0
+
+- name: Download the runner archive
+  ansible.windows.win_get_url:
+    url: "{{ gha_runner_archive_url }}"
+    dest: "{{ gha_runner_archive_path_windows }}"
+  when: gha_runners_pending | length > 0
+
+- name: Install each pending runner
+  ansible.builtin.include_tasks: install_windows_runner.yml
+  loop: "{{ gha_runners_pending }}"
+  loop_control:
+    loop_var: runner
+    label: "{{ runner.dirname }}"

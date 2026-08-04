@@ -1,0 +1,118 @@
+---
+- name: "Compute the paths for {{ runner.dirname }}"
+  ansible.builtin.set_fact:
+    gha_runner_staging_path: "{{ gha_runners_path }}\\{{ gha_staging_prefix }}{{ runner.dirname }}{{ gha_staging_suffix }}"
+    gha_runner_final_path: "{{ gha_runners_path }}\\{{ runner.dirname }}"
+
+# Unlike Linux and macOS, Windows couples registration and service creation
+# into a single config.cmd invocation, and the service's ImagePath points at
+# wherever that ran. So the directory is moved into place first and configured
+# afterwards, with the rescue block below undoing everything if it fails.
+- name: "Install runner {{ runner.dirname }}"
+  block:
+    - name: "Clear any staging directory left by an earlier failed run of {{ runner.dirname }}"
+      ansible.windows.win_file:
+        path: "{{ gha_runner_staging_path }}"
+        state: absent
+
+    - name: "Create the staging directory for {{ runner.dirname }}"
+      ansible.windows.win_file:
+        path: "{{ gha_runner_staging_path }}"
+        state: directory
+
+    - name: "Unpack the runner for {{ runner.dirname }}"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Expand-Archive -LiteralPath '{{ gha_runner_archive_path_windows }}' -DestinationPath '{{ gha_runner_staging_path }}' -Force
+
+    - name: "Move {{ runner.dirname }} into place"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Move-Item -LiteralPath '{{ gha_runner_staging_path }}' -Destination '{{ gha_runner_final_path }}'
+      args:
+        creates: "{{ gha_runner_final_path }}"
+
+    - name: "Mint a registration token for {{ runner.repo }}"
+      ansible.builtin.uri:
+        url: "{{ gha_github_api_url }}/repos/{{ runner.repo }}/actions/runners/registration-token"
+        method: POST
+        headers:
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+          Authorization: "Bearer {{ gha_github_token }}"
+        body_format: json
+        status_code: 201
+      register: gha_registration
+      delegate_to: localhost
+      become: false
+      no_log: "{{ gha_hide_sensitive_logs | bool }}"
+
+    # The arguments travel as JSON inside a PowerShell here-string, which is
+    # entirely literal, then get splatted. That keeps the backslash and space in
+    # 'NT AUTHORITY\NETWORK SERVICE' intact and stops PowerShell from
+    # interpolating anything in a label or runner name. The password goes
+    # through the environment instead, because --windowslogonpassword mangles
+    # values containing shell metacharacters.
+    - name: "Register {{ runner.runner_name }} with {{ runner.repo }}"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        $argv = @'
+        {{ _gha_config_argv | to_json }}
+        '@ | ConvertFrom-Json
+        & '{{ gha_runner_final_path }}\config.cmd' @argv
+        if ($LASTEXITCODE -ne 0) { throw "config.cmd exited with $LASTEXITCODE" }
+      args:
+        chdir: "{{ gha_runner_final_path }}"
+      environment:
+        ACTIONS_RUNNER_INPUT_WINDOWSLOGONPASSWORD: "{{ gha_windows_logon_password }}"
+      changed_when: true
+      no_log: "{{ gha_hide_sensitive_logs | bool }}"
+      vars:
+        _gha_config_argv: >-
+          {{ ['--unattended',
+              '--url', gha_github_url ~ '/' ~ runner.repo,
+              '--token', gha_registration.json.token,
+              '--name', runner.runner_name,
+              '--work', runner.work_dir]
+             + (['--labels', runner.labels | join(',')] if runner.labels | length > 0 else [])
+             + (['--no-default-labels'] if runner.no_default_labels | bool else [])
+             + (['--runasservice', '--windowslogonaccount', gha_windows_logon_account]
+                if runner.install_as_service | bool else [])
+             + (runner.extra_config_args.split() if runner.extra_config_args | trim | length > 0 else []) }}
+
+    - name: "Read back the service name for {{ runner.dirname }}"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Get-Content -LiteralPath '{{ gha_runner_final_path }}\.service' -Raw
+      changed_when: false
+      register: gha_runner_service_name
+      when: runner.install_as_service | bool
+
+    - name: "Confirm the service for {{ runner.dirname }} is running"
+      ansible.windows.win_service_info:
+        name: "{{ gha_runner_service_name.stdout | trim }}"
+      register: gha_runner_service_info
+      retries: 5
+      delay: 2
+      until:
+        - gha_runner_service_info.services | length > 0
+        - gha_runner_service_info.services[0].state == 'started'
+      when: runner.install_as_service | bool
+
+    - name: "Confirm {{ runner.dirname }} registered with GitHub"
+      ansible.builtin.include_tasks: verify_registration.yml
+      when: gha_verify_registration | bool
+
+  rescue:
+    - name: "Roll back the failed install of {{ runner.dirname }}"
+      ansible.builtin.include_tasks: cleanup_windows.yml
+      when: gha_cleanup_on_failure | bool
+
+    - name: "Fail after handling {{ runner.dirname }}"
+      ansible.builtin.fail:
+        msg: >-
+          Failed to install runner {{ runner.dirname }} for {{ runner.repo }}.
+          {{ 'The partial install was rolled back, so re-running this play will retry it.'
+             if gha_cleanup_on_failure | bool
+             else 'gha_cleanup_on_failure is false, so the partial install was left in place at '
+                  ~ gha_runner_final_path ~ ' (or its .staging directory) for inspection.' }}

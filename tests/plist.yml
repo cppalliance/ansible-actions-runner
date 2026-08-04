@@ -1,0 +1,84 @@
+---
+# Renders the LaunchDaemon template and checks that it is a well-formed plist
+# with the keys launchd needs. macOS cannot be tested from Linux CI, but a
+# malformed plist is the most likely way this template breaks, and plistlib
+# catches that anywhere.
+#
+# Offline. Run it through tests/run.sh.
+
+- name: Check the LaunchDaemon template
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    gha_out: "{{ playbook_dir }}/../.cache/plist"
+    # Stand-ins for the facts the role would have resolved by this point.
+    gha_macos_svc_name: actions.runner.boostorg-boost.build-mac-1_2
+    gha_runner_final_path: /Users/gha/runners/boostorg_boost_2
+    gha_runner_user: gha
+    gha_runner_group_resolved: staff
+    gha_runner_home_path: /Users/gha
+
+  tasks:
+    - name: Create the output directory
+      ansible.builtin.file:
+        path: "{{ gha_out }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render the template both with and without ProcessType
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/Ansible-Actions-Runner/templates/launchdaemon.plist.j2"
+        dest: "{{ gha_out }}/{{ item.name }}.plist"
+        mode: "0644"
+      loop:
+        - name: plain
+          interactive: false
+        - name: interactive
+          interactive: true
+      vars:
+        gha_macos_process_type_interactive: "{{ item.interactive }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Parse both renderings and report their contents
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import plistlib, sys
+            for name in ("plain", "interactive"):
+                with open(f"{sys.argv[1]}/{name}.plist", "rb") as fh:
+                    data = plistlib.load(fh)
+                print(name, sorted(data), data.get("ProcessType", "-"))
+          - "{{ gha_out }}"
+      register: gha_plist
+      changed_when: false
+
+    - name: Show what plistlib parsed
+      ansible.builtin.debug:
+        var: gha_plist.stdout_lines
+
+    - name: The plist must carry the keys launchd needs to run a boot-time daemon
+      ansible.builtin.assert:
+        that:
+          - "'Label' in gha_plist.stdout_lines[0]"
+          - "'ProgramArguments' in gha_plist.stdout_lines[0]"
+          - "'UserName' in gha_plist.stdout_lines[0]"
+          - "'WorkingDirectory' in gha_plist.stdout_lines[0]"
+          - "'RunAtLoad' in gha_plist.stdout_lines[0]"
+          - "'EnvironmentVariables' in gha_plist.stdout_lines[0]"
+          - "'SessionCreate' in gha_plist.stdout_lines[0]"
+
+    - name: ProcessType must be absent by default and present when asked for
+      ansible.builtin.assert:
+        that:
+          - gha_plist.stdout_lines[0].endswith('-')
+          - gha_plist.stdout_lines[1].endswith('Interactive')
+        fail_msg: "Got {{ gha_plist.stdout_lines }}"
+
+    - name: Clean up
+      ansible.builtin.file:
+        path: "{{ gha_out }}"
+        state: absent

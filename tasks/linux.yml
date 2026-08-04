@@ -1,0 +1,55 @@
+---
+- name: Install packages
+  when: gha_runner_packages | length > 0
+  block:
+    - name: Refresh the apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      become: true
+      when: ansible_facts['pkg_mgr'] in ['apt', 'apt-get']
+
+    - name: Install the packages the role depends on
+      ansible.builtin.package:
+        name: "{{ gha_runner_packages }}"
+        state: present
+      become: true
+
+- name: Ensure the runner user exists
+  ansible.builtin.user:
+    name: "{{ gha_runner_user }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+  become: true
+  when: gha_runner_manage_user | bool
+
+- name: Read the runner user's passwd entry
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ gha_runner_user }}"
+    fail_key: true
+  become: true
+  when: gha_runner_home | length == 0
+
+- name: Resolve the runner paths
+  ansible.builtin.set_fact:
+    gha_runner_home_path: "{{ _gha_home }}"
+    gha_runner_group_resolved: "{{ gha_runner_group | default(gha_runner_user, true) }}"
+    gha_runners_path: "{{ gha_runners_dir if gha_runners_dir | length > 0 else _gha_home ~ '/runners' }}"
+  vars:
+    _gha_home: >-
+      {{ gha_runner_home if gha_runner_home | length > 0
+         else ansible_facts['getent_passwd'][gha_runner_user][4] }}
+
+- name: Ensure the runners parent directory exists
+  ansible.builtin.file:
+    path: "{{ gha_runners_path }}"
+    state: directory
+    owner: "{{ gha_runner_user }}"
+    group: "{{ gha_runner_group_resolved }}"
+    mode: "0755"
+  become: true
+
+- name: Include the shared install flow
+  ansible.builtin.include_tasks: install_unix.yml

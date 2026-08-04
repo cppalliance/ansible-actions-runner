@@ -1,0 +1,25 @@
+---
+# Windows runners live off the drive root because the service logs on as
+# NETWORK SERVICE, which cannot read another account's profile directory.
+#
+#   C:\actions-runner\boostorg_boost_1
+#   C:\actions-runner\boostorg_boost_2
+
+gha_runners:
+  - repo: boostorg/boost
+    labels:
+      - windows
+      - x64
+      - msvc
+
+  - repo: boostorg/boost
+    labels:
+      - windows
+      - x64
+      - mingw
+
+# To run the service as a real account instead, set both of these and vault the
+# password:
+#
+# gha_windows_logon_account: 'BUILDDOMAIN\svc-gha'
+# gha_windows_logon_password: "{{ vault_gha_windows_password }}"

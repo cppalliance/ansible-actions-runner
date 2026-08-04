@@ -1,0 +1,113 @@
+---
+# Offline check of preflight.yml: suffix auto-numbering, directory naming,
+# runner naming and per-entry overrides. Touches no network and no host.
+#
+#   ANSIBLE_ROLES_PATH=.. ansible-playbook tests/normalize.yml
+
+- name: Check the runner normalization rules
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    gha_github_token: dummy-token-for-offline-test
+    gha_runner_version: "2.336.0"
+    # Off for the bulk of the checks so that runner names are compared against
+    # the live hostname. The opposite case gets its own block at the end.
+    gha_set_hostname: false
+    gha_runner_default_labels:
+      - fallback-label
+    gha_runners:
+      - repo: boostorg/boost
+      - repo: boostorg/boost
+        labels:
+          - big-memory
+      - repo: boostorg/release-tools
+        suffix: nightly
+      - repo: boostorg/boost
+      - repo: other/thing
+        install_as_service: false
+        name: explicitly-named
+        work_dir: scratch
+        extra_config_args: "--ephemeral"
+
+  tasks:
+    - name: Run preflight
+      ansible.builtin.include_role:
+        name: Ansible-Actions-Runner
+        tasks_from: preflight
+
+    - name: Show the normalized entries
+      ansible.builtin.debug:
+        var: gha_runners_normalized
+
+    - name: Directory names auto-number per repo and honour explicit suffixes
+      ansible.builtin.assert:
+        that:
+          - gha_runners_normalized | map(attribute='dirname') | list == [
+              'boostorg_boost_1',
+              'boostorg_boost_2',
+              'boostorg_release-tools_nightly',
+              'boostorg_boost_3',
+              'other_thing_1',
+            ]
+        fail_msg: "Got {{ gha_runners_normalized | map(attribute='dirname') | list }}"
+
+    - name: Runner names default to <hostname>_<suffix> and can be overridden
+      ansible.builtin.assert:
+        that:
+          - gha_runners_normalized | map(attribute='runner_name') | list == [
+              ansible_facts['hostname'] ~ '_1',
+              ansible_facts['hostname'] ~ '_2',
+              ansible_facts['hostname'] ~ '_nightly',
+              ansible_facts['hostname'] ~ '_3',
+              'explicitly-named',
+            ]
+        fail_msg: "Got {{ gha_runners_normalized | map(attribute='runner_name') | list }}"
+
+    - name: Labels fall back to the role default only when not given
+      ansible.builtin.assert:
+        that:
+          - gha_runners_normalized[0].labels == ['fallback-label']
+          - gha_runners_normalized[1].labels == ['big-memory']
+
+    - name: A literal false for install_as_service survives the defaulting
+      ansible.builtin.assert:
+        that:
+          - gha_runners_normalized[0].install_as_service | bool
+          - not (gha_runners_normalized[4].install_as_service | bool)
+
+    - name: Per-entry work_dir and extra args are carried through
+      ansible.builtin.assert:
+        that:
+          - gha_runners_normalized[0].work_dir == '_work'
+          - gha_runners_normalized[4].work_dir == 'scratch'
+          - gha_runners_normalized[4].extra_config_args == '--ephemeral'
+
+    - name: Pinning a version skips the releases API and strips any leading v
+      ansible.builtin.assert:
+        that:
+          - gha_runner_resolved_version == '2.336.0'
+
+    # A machine being renamed by this role has a stale hostname fact for the
+    # rest of the play, and on Windows until it reboots. Registering runners
+    # under that stale name is exactly the mismatch gha_set_hostname exists to
+    # prevent, so the names have to follow the incoming hostname instead.
+    - name: Re-run preflight with the rename enabled
+      ansible.builtin.include_role:
+        name: Ansible-Actions-Runner
+        tasks_from: preflight
+      vars:
+        gha_set_hostname: true
+        gha_hostname: renamed-host
+
+    - name: Runner names follow the hostname being applied, not the current one
+      ansible.builtin.assert:
+        that:
+          - gha_runners_normalized | map(attribute='runner_name') | list == [
+              'renamed-host_1',
+              'renamed-host_2',
+              'renamed-host_nightly',
+              'renamed-host_3',
+              'explicitly-named',
+            ]
+        fail_msg: "Got {{ gha_runners_normalized | map(attribute='runner_name') | list }}"

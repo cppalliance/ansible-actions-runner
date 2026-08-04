@@ -1,0 +1,118 @@
+---
+# Offline check of the hostname feature: that a name is split into its short and
+# domain parts correctly, and that an unusable name is rejected before any of it
+# is applied.
+#
+# The per-platform tasks that would really rename the machine are swapped for
+# tests/hostname_probe.yml, so this is safe to run anywhere, including on a
+# developer's own workstation.
+#
+#   ANSIBLE_ROLES_PATH=tests/roles ansible-playbook tests/hostname.yml
+
+- name: Check the hostname validation and derivation rules
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    gha_probe_tasks:
+      Linux: "{{ playbook_dir }}/hostname_probe.yml"
+      Darwin: "{{ playbook_dir }}/hostname_probe.yml"
+      Win32NT: "{{ playbook_dir }}/hostname_probe.yml"
+
+  tasks:
+    - name: Resolve a fully qualified name
+      ansible.builtin.include_role:
+        name: Ansible-Actions-Runner
+        tasks_from: hostname
+      vars:
+        gha_hostname_tasks_map: "{{ gha_probe_tasks }}"
+        gha_hostname: build-linux-1
+        gha_hostname_fqdn: build-linux-1.example.com
+
+    - name: The domain is everything after the first dot
+      ansible.builtin.assert:
+        that:
+          - gha_probe_hostname == 'build-linux-1'
+          - gha_probe_fqdn == 'build-linux-1.example.com'
+          - gha_probe_domain == 'example.com'
+        fail_msg: >-
+          Got hostname '{{ gha_probe_hostname }}', fqdn '{{ gha_probe_fqdn }}',
+          domain '{{ gha_probe_domain }}'.
+
+    # A host named in the inventory without a domain is the common case for a
+    # small fleet, and it has to stay valid rather than produce an empty domain
+    # that platforms then try to apply.
+    - name: Resolve a bare short name
+      ansible.builtin.include_role:
+        name: Ansible-Actions-Runner
+        tasks_from: hostname
+      vars:
+        gha_hostname_tasks_map: "{{ gha_probe_tasks }}"
+        gha_hostname: buildbox
+        gha_hostname_fqdn: ""
+
+    - name: A name with no domain yields no domain
+      ansible.builtin.assert:
+        that:
+          - gha_probe_hostname == 'buildbox'
+          - gha_probe_domain == ''
+        fail_msg: "Got hostname '{{ gha_probe_hostname }}', domain '{{ gha_probe_domain }}'."
+
+    - name: Try to apply a name that is not a hostname
+      block:
+        - name: Invoke the hostname tasks with a leading hyphen
+          ansible.builtin.include_role:
+            name: Ansible-Actions-Runner
+            tasks_from: hostname
+          vars:
+            gha_hostname_tasks_map: "{{ gha_probe_tasks }}"
+            gha_hostname: -not-a-hostname
+            gha_hostname_fqdn: ""
+
+        - name: The role should have refused
+          ansible.builtin.fail:
+            msg: >-
+              '-not-a-hostname' was accepted. An invalid name has to be caught
+              before the role starts renaming machines with it.
+      rescue:
+        - name: Note that the invalid name was rejected
+          ansible.builtin.debug:
+            msg: "Invalid hostname rejected, as intended."
+
+    - name: Invent a host that the inventory addresses by IP
+      ansible.builtin.add_host:
+        name: 10.0.0.5
+        groups: gha_addressed_by_ip
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      changed_when: false
+
+# Left to the role's own defaults rather than an explicit gha_hostname, so that
+# what is being checked is the default derivation and not a value the test
+# handed it.
+- name: Check that an inventory addressed by IP is refused
+  hosts: gha_addressed_by_ip
+  gather_facts: true
+  tasks:
+    - name: Try to derive a hostname from an address
+      block:
+        - name: Invoke the hostname tasks
+          ansible.builtin.include_role:
+            name: Ansible-Actions-Runner
+            tasks_from: hostname
+          vars:
+            gha_hostname_tasks_map:
+              Linux: "{{ playbook_dir }}/hostname_probe.yml"
+              Darwin: "{{ playbook_dir }}/hostname_probe.yml"
+              Win32NT: "{{ playbook_dir }}/hostname_probe.yml"
+
+        - name: The role should have refused
+          ansible.builtin.fail:
+            msg: >-
+              The machine would have been renamed to
+              '{{ gha_probe_hostname | default('?') }}', derived from an IP
+              address.
+      rescue:
+        - name: Note that the address was rejected
+          ansible.builtin.debug:
+            msg: "IP-addressed inventory entry rejected, as intended."

@@ -1,0 +1,85 @@
+---
+# Runs from the rescue block of install_windows_runner.yml. Best-effort only;
+# the caller fails afterwards regardless of what happens here.
+
+- name: "Locate the partial install of {{ runner.dirname }}"
+  ansible.windows.win_stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ gha_runner_final_path }}"
+    - "{{ gha_runner_staging_path }}"
+  register: gha_cleanup_stat
+  failed_when: false
+
+- name: "Pick the directory to roll back for {{ runner.dirname }}"
+  ansible.builtin.set_fact:
+    gha_cleanup_path: >-
+      {{ gha_cleanup_stat.results | selectattr('stat.exists', 'defined')
+         | selectattr('stat.exists') | map(attribute='item') | list | first | default('', true) }}
+
+- name: "Roll back {{ runner.dirname }}"
+  when: gha_cleanup_path | length > 0
+  block:
+    - name: "Check what the failed install of {{ runner.dirname }} left behind"
+      ansible.windows.win_stat:
+        path: "{{ gha_cleanup_path }}\\{{ item }}"
+      loop:
+        - .credentials
+        - .service
+      register: gha_cleanup_artifacts
+      failed_when: false
+
+    - name: "Record what needs undoing for {{ runner.dirname }}"
+      ansible.builtin.set_fact:
+        gha_cleanup_is_registered: "{{ gha_cleanup_artifacts.results[0].stat.exists | default(false) }}"
+        gha_cleanup_has_service: "{{ gha_cleanup_artifacts.results[1].stat.exists | default(false) }}"
+
+    - name: "Stop and remove the service for {{ runner.dirname }}"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'SilentlyContinue'
+        $name = (Get-Content -LiteralPath '{{ gha_cleanup_path }}\.service' -Raw).Trim()
+        if ($name) {
+          Stop-Service -Name $name -Force
+          & sc.exe delete $name
+        }
+      changed_when: true
+      failed_when: false
+      when: gha_cleanup_has_service | bool
+
+    - name: "Mint a removal token for {{ runner.repo }}"
+      ansible.builtin.uri:
+        url: "{{ gha_github_api_url }}/repos/{{ runner.repo }}/actions/runners/remove-token"
+        method: POST
+        headers:
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+          Authorization: "Bearer {{ gha_github_token }}"
+        body_format: json
+        status_code: 201
+      register: gha_removal
+      delegate_to: localhost
+      become: false
+      no_log: "{{ gha_hide_sensitive_logs | bool }}"
+      failed_when: false
+      when: gha_cleanup_is_registered | bool
+
+    - name: "Unregister {{ runner.runner_name }} from {{ runner.repo }}"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'SilentlyContinue'
+        & '{{ gha_cleanup_path }}\config.cmd' remove --token '{{ gha_removal.json.token }}'
+      args:
+        chdir: "{{ gha_cleanup_path }}"
+      changed_when: true
+      failed_when: false
+      no_log: "{{ gha_hide_sensitive_logs | bool }}"
+      when:
+        - gha_cleanup_is_registered | bool
+        - gha_removal.json.token is defined
+
+    - name: "Delete the directory for {{ runner.dirname }}"
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ gha_runner_final_path }}"
+        - "{{ gha_runner_staging_path }}"

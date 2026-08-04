@@ -1,0 +1,46 @@
+---
+# ansible_facts.architecture -> the token GitHub uses in its release filenames.
+# "64-bit" is what the Windows fact gatherer reports.
+gha_runner_arch_map:
+  x86_64: x64
+  amd64: x64
+  AMD64: x64
+  64-bit: x64
+  aarch64: arm64
+  arm64: arm64
+  armv7l: arm
+  armv6l: arm
+
+# ansible_facts.system -> GitHub's platform token.
+gha_runner_os_map:
+  Linux: linux
+  Darwin: osx
+  Win32NT: win
+
+gha_runner_os: "{{ gha_runner_os_map[ansible_facts['system']] }}"
+gha_runner_arch: "{{ gha_runner_arch_map[ansible_facts['architecture']] }}"
+
+gha_runner_archive_ext: "{{ 'zip' if gha_runner_os == 'win' else 'tar.gz' }}"
+gha_runner_archive_name: >-
+  actions-runner-{{ gha_runner_os }}-{{ gha_runner_arch }}-{{ gha_runner_resolved_version }}.{{ gha_runner_archive_ext }}
+gha_runner_archive_url: >-
+  {{ gha_github_url }}/{{ gha_runner_download_repository }}/releases/download/v{{ gha_runner_resolved_version }}/{{ gha_runner_archive_name }}
+
+# Downloaded once per host and unpacked once per runner.
+gha_runner_archive_path: "/tmp/{{ gha_runner_archive_name }}"
+gha_runner_archive_path_windows: 'C:\Windows\Temp\{{ gha_runner_archive_name }}'
+
+# ansible_facts.system -> the hostname tasks for that platform.
+gha_hostname_tasks_map:
+  Linux: hostname_linux.yml
+  Darwin: hostname_macos.yml
+  Win32NT: hostname_windows.yml
+
+# The domain part on its own. Windows stores it separately from the computer
+# name rather than as one fully qualified string.
+gha_hostname_domain: "{{ gha_hostname_fqdn.split('.', 1)[1] if '.' in gha_hostname_fqdn else '' }}"
+
+# Directory names are prefixed with a dot while the install is in flight, so a
+# name without the dot always denotes a finished runner.
+gha_staging_prefix: "."
+gha_staging_suffix: ".staging"

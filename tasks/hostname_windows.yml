@@ -1,0 +1,40 @@
+---
+# NetBIOS caps computer names at 15 characters and Windows refuses anything
+# longer, so catch it here rather than halfway through the rename.
+- name: Assert that the hostname fits the Windows computer name limit
+  ansible.builtin.assert:
+    that:
+      - gha_hostname | length <= 15
+    fail_msg: >-
+      Windows computer names are limited to 15 characters, but '{{ gha_hostname }}'
+      is {{ gha_hostname | length }}. Set gha_hostname to a shorter name.
+    quiet: true
+
+- name: Set the computer name
+  ansible.windows.win_hostname:
+    name: "{{ gha_hostname }}"
+  register: gha_win_hostname
+
+# Windows holds the domain part apart from the computer name, and assembles the
+# FQDN from the two. Domain on its own is rewritten whenever an interface
+# renegotiates DHCP; NV Domain is the value that survives, so both are set.
+- name: Set the primary DNS suffix
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
+    name: "{{ item }}"
+    data: "{{ gha_hostname_domain }}"
+    type: string
+  loop:
+    - Domain
+    - NV Domain
+  when: gha_hostname_domain | length > 0
+
+# Deliberately not rebooting: this role may well be running on a machine that is
+# already doing something. The runners still register under the new name, since
+# that comes from the inventory rather than from the live fact.
+- name: Report that the rename needs a reboot
+  ansible.builtin.debug:
+    msg: >-
+      The computer name has been set to {{ gha_hostname }}, but Windows keeps
+      reporting the old one until the machine reboots.
+  when: gha_win_hostname.reboot_required | default(false)

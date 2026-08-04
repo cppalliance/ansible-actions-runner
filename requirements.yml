@@ -1,0 +1,5 @@
+---
+collections:
+  # Only needed when targeting Windows hosts.
+  - name: ansible.windows
+    version: ">=2.0.0"

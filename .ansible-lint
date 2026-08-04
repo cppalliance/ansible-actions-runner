@@ -1,0 +1,14 @@
+---
+profile: production
+
+exclude_paths:
+  - .cache/
+  - .github/
+
+skip_list:
+  # Task names in this role interpolate the runner being worked on, which reads
+  # far better in output than a static name when a host has six runners.
+  - name[template]
+
+warn_list:
+  - experimental
