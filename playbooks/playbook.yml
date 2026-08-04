@@ -1,0 +1,12 @@
+---
+- name: Install GitHub Actions Runners
+  hosts: newservers:!windows
+  become: true
+  roles:
+    - {role: 'cppalliance.github_actions_runner'}
+
+- name: Install GitHub Actions Runners (Windows)
+  hosts: newservers:&windows
+  roles:
+    - {role: 'cppalliance.github_actions_runner'}
+
