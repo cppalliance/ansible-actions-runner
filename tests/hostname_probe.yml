@@ -8,3 +8,4 @@
     gha_probe_hostname: "{{ gha_hostname }}"
     gha_probe_fqdn: "{{ gha_hostname_fqdn }}"
     gha_probe_domain: "{{ gha_hostname_domain }}"
+    gha_probe_macos_names: "{{ gha_macos_hostnames }}"

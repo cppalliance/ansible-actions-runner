@@ -9,4 +9,3 @@
   hosts: newservers:&windows
   roles:
     - {role: 'cppalliance.github_actions_runner'}
-

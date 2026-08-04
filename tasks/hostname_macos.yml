@@ -1,38 +1,40 @@
 ---
-# macOS keeps three names, and the hostname module sets all of them to the same
-# value: ComputerName (the one shown in the UI), LocalHostName (the Bonjour
-# name, which rejects dots) and HostName (the one the shell and the network
-# see). It decides whether it has work to do by looking at ComputerName only,
-# which is what lets the next task specialise HostName without the two fighting
-# each other on every run.
-- name: Set the hostname
-  ansible.builtin.hostname:
-    name: "{{ gha_hostname }}"
-  become: true
+# Driven through scutil rather than ansible.builtin.hostname, which cannot
+# express what is wanted here. The module's Darwin strategy insists all three
+# macOS names hold the value it was given — it compares
+# (HostName, ComputerName, LocalHostName) against the name as a tuple and
+# rewrites all three if any one of them differs. Giving it the short name and
+# then setting HostName to the fully qualified one leaves the two steps undoing
+# each other on every run, forever: the module resets HostName to the short
+# name, the next task sets it back. Both report changed, and in between the
+# machine briefly answers to the wrong name.
+#
+# scutil is what the module calls anyway, so nothing is lost by addressing the
+# three names separately, and each can then be left alone when it is correct.
 
-- name: Read the currently configured full DNS name
+- name: Read the names macOS currently holds
   ansible.builtin.command:
     argv:
       - /usr/sbin/scutil
       - --get
-      - HostName
-  register: gha_scutil_hostname
+      - "{{ item }}"
+  loop: "{{ gha_macos_hostnames.keys() | list }}"
+  register: gha_macos_current
   changed_when: false
-  # scutil exits non-zero when HostName has never been set, which is the normal
-  # state of a fresh machine rather than an error.
+  # scutil exits non-zero for a name that has never been set, which is the
+  # normal state of a fresh machine rather than an error.
   failed_when: false
-  when: gha_hostname_fqdn | length > 0
 
-# Only HostName can carry the domain: ComputerName and LocalHostName stay short.
-- name: Set the full DNS name
+- name: Set the names that are not already right
   ansible.builtin.command:
     argv:
       - /usr/sbin/scutil
       - --set
-      - HostName
-      - "{{ gha_hostname_fqdn }}"
+      - "{{ item.item }}"
+      - "{{ gha_macos_hostnames[item.item] }}"
   become: true
   changed_when: true
-  when:
-    - gha_hostname_fqdn | length > 0
-    - gha_scutil_hostname.stdout | default('') | trim != gha_hostname_fqdn
+  when: item.stdout | default('') | trim != gha_macos_hostnames[item.item]
+  loop: "{{ gha_macos_current.results }}"
+  loop_control:
+    label: "{{ item.item }}"

@@ -117,6 +117,9 @@ Linux gets a `127.0.1.1` line in `/etc/hosts` alongside `hostname`, the Debian
 convention that lets `hostname -f` answer on a DHCP machine. macOS has three
 names, and only `HostName` can hold a domain: `ComputerName` and
 `LocalHostName` stay short, the latter because the Bonjour name rejects dots.
+They are driven through `scutil` and each is read before it is written, so a
+second run reports no change — `ansible.builtin.hostname` cannot express this,
+as it forces all three names to the same value.
 Windows stores the domain apart from the computer name, under `Domain` and
 `NV Domain`, and does not adopt a new computer name until it reboots — the role
 reports this rather than rebooting a machine that may be busy.

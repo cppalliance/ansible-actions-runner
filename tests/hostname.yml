@@ -39,6 +39,16 @@
           Got hostname '{{ gha_probe_hostname }}', fqdn '{{ gha_probe_fqdn }}',
           domain '{{ gha_probe_domain }}'.
 
+    # Only HostName takes the domain. Giving it to the other two is what makes
+    # the macOS tasks non-idempotent, so the split is worth pinning down.
+    - name: Of the three macOS names, only HostName is qualified
+      ansible.builtin.assert:
+        that:
+          - gha_probe_macos_names['ComputerName'] == 'build-linux-1'
+          - gha_probe_macos_names['LocalHostName'] == 'build-linux-1'
+          - gha_probe_macos_names['HostName'] == 'build-linux-1.example.com'
+        fail_msg: "Got {{ gha_probe_macos_names }}"
+
     # A host named in the inventory without a domain is the common case for a
     # small fleet, and it has to stay valid rather than produce an empty domain
     # that platforms then try to apply.
@@ -56,7 +66,10 @@
         that:
           - gha_probe_hostname == 'buildbox'
           - gha_probe_domain == ''
-        fail_msg: "Got hostname '{{ gha_probe_hostname }}', domain '{{ gha_probe_domain }}'."
+          - gha_probe_macos_names.values() | unique | list == ['buildbox']
+        fail_msg: >-
+          Got hostname '{{ gha_probe_hostname }}', domain
+          '{{ gha_probe_domain }}', macOS names {{ gha_probe_macos_names }}.
 
     - name: Try to apply a name that is not a hostname
       block:

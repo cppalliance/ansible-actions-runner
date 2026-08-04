@@ -40,6 +40,14 @@ gha_hostname_tasks_map:
 # name rather than as one fully qualified string.
 gha_hostname_domain: "{{ gha_hostname_fqdn.split('.', 1)[1] if '.' in gha_hostname_fqdn else '' }}"
 
+# The three names macOS keeps, and what each should end up as. Only HostName
+# can carry a domain: ComputerName is the user-facing label in System Settings,
+# and LocalHostName is the Bonjour name, which has no use for one.
+gha_macos_hostnames:
+  ComputerName: "{{ gha_hostname }}"
+  LocalHostName: "{{ gha_hostname }}"
+  HostName: "{{ gha_hostname_fqdn if gha_hostname_fqdn | length > 0 else gha_hostname }}"
+
 # Directory names are prefixed with a dot while the install is in flight, so a
 # name without the dot always denotes a finished runner.
 gha_staging_prefix: "."
