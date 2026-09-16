@@ -19,14 +19,61 @@
     - gha_runners | length > 0
     - not gha_windows_logon_account.upper().startswith('NT AUTHORITY\\')
 
-# Chocolatey bootstraps itself when it is missing, so this works on a machine
-# that has never seen it. Kept ahead of everything else the way the Linux
-# package step is: what follows may depend on what it installs — git bash for
-# the serial-execution hooks above all.
+# Kept ahead of everything else the way the Linux package step is: what
+# follows may depend on what it installs — git bash for the serial-execution
+# hooks above all.
+#
+# Chocolatey's own Ansible module is deliberately not used. It takes inventory
+# with `choco list --all-versions`, an argument Chocolatey CLI 2.5 removed, so
+# against a current choco every call fails before installing anything, and
+# chocolatey-ansible has no released fix. Calling choco directly is both what
+# works and one less collection for a Windows control node to install.
+#
+# choco is run by absolute path throughout, never through PATH: the WinRM
+# service's environment dates from boot, so a choco installed by the task
+# above would not be on the PATH this play can see.
+- name: Install Chocolatey if it is missing
+  ansible.windows.win_shell: |
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    [System.Net.ServicePointManager]::SecurityProtocol =
+        [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+  args:
+    creates: "{{ gha_windows_choco }}"
+  when: gha_win_packages | length > 0
+
+- name: Check that Chocolatey is where gha_windows_choco says
+  ansible.windows.win_stat:
+    path: "{{ gha_windows_choco }}"
+  register: gha_windows_choco_stat
+  when: gha_win_packages | length > 0
+
+- name: Assert that Chocolatey can be called
+  ansible.builtin.assert:
+    that:
+      - gha_windows_choco_stat.stat.exists
+    fail_msg: >-
+      {{ gha_windows_choco }} does not exist even after bootstrapping
+      Chocolatey. If this machine keeps Chocolatey somewhere else, point
+      gha_windows_choco at it, or set gha_win_packages to [] and install
+      {{ gha_win_packages | join(', ') }} some other way.
+    quiet: true
+  when: gha_win_packages | length > 0
+
+# Exit code 2 means "already installed, nothing done" when the machine has
+# useEnhancedExitCodes turned on, which is not a failure
+# (chocolatey-ansible#168). The names travel as JSON through a literal
+# here-string and are splatted, the same way config.cmd's arguments are.
 - name: Install packages
-  chocolatey.chocolatey.win_chocolatey:
-    name: "{{ gha_win_packages }}"
-    state: present
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $packages = @'
+    {{ gha_win_packages | to_json }}
+    '@ | ConvertFrom-Json
+    & '{{ gha_windows_choco }}' install --yes --no-progress @packages
+    if ($LASTEXITCODE -notin @(0, 2)) { throw "choco install exited with $LASTEXITCODE" }
+  register: gha_choco_install
+  changed_when: "'installed 0/' not in gha_choco_install.stdout"
   when: gha_win_packages | length > 0
 
 - name: Ensure the runners parent directory exists

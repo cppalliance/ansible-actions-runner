@@ -34,7 +34,7 @@ short-lived registration token per runner, both from the control node.
 ## Requirements
 
 - Ansible 2.14 or newer on the control node.
-- `ansible.windows`, `community.windows` and `chocolatey.chocolatey`
+- `ansible.windows` and `community.windows`
   (`ansible-galaxy collection install -r requirements.yml`), only if you
   target Windows.
 - A GitHub token on the **control node**, with `repo` scope on a classic PAT or
@@ -274,9 +274,11 @@ it runs. GitHub's own ceiling on a job is 360 minutes.
 ### On Windows
 
 The same two bash scripts run the protocol, under git bash. The role installs
-git through Chocolatey (`gha_win_packages`, bootstrapping Chocolatey itself if
-needed) and puts the scripts next to the runner directories —
-`C:\actions-runner\scripts` by default.
+git through Chocolatey (`gha_win_packages`, installing Chocolatey itself first
+if it is missing) and puts the scripts next to the runner directories —
+`C:\actions-runner\scripts` by default. It calls `choco` directly rather than
+through `chocolatey.chocolatey`, whose inventory command was broken by
+Chocolatey CLI 2.5; `tasks/windows.yml` has the details.
 
 Two things differ. The lock cannot live at `/var/lock`, which under git bash
 would resolve to a directory inside the Git installation, so on Windows the
@@ -383,6 +385,7 @@ The commonly useful ones; `defaults/main.yml` documents the rest.
 | `gha_macos_launchctl_method` | `bootstrap` | Or `load` for the older form |
 | `gha_windows_logon_account` | `NT AUTHORITY\NETWORK SERVICE` | Windows service account |
 | `gha_win_packages` | `[git]` | Chocolatey packages installed on Windows before anything else |
+| `gha_windows_choco` | `C:\ProgramData\chocolatey\bin\choco.exe` | Where choco is called from |
 | `gha_windows_bash` | `C:\Program Files\Git\bin\bash.exe` | The bash the Windows hooks run under |
 
 ## Tests

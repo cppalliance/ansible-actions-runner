@@ -204,11 +204,16 @@ gha_macos_process_type_interactive: false
 # --- Windows -------------------------------------------------------------
 
 # Installed through Chocolatey before the runners, the way gha_runner_packages
-# is installed on Linux. Chocolatey bootstraps itself if it is missing. git is
-# here for git bash, which the serial-execution hooks run under; set this to []
-# if the machine gets its packages some other way.
+# is installed on Linux. Chocolatey itself is installed first if it is missing.
+# git is here for git bash, which the serial-execution hooks run under; set
+# this to [] if the machine gets its packages some other way — nothing
+# Chocolatey-related runs at all then.
 gha_win_packages:
   - git
+
+# Where choco lands. The role calls it by absolute path, because a Chocolatey
+# it just installed is not yet on the PATH this play can see.
+gha_windows_choco: 'C:\ProgramData\chocolatey\bin\choco.exe'
 
 # Where git bash lives; the serial-execution hook launchers run it by absolute
 # path. This is where the Chocolatey git package puts it.
