@@ -61,6 +61,26 @@
       become: true
       changed_when: true
 
+    # The runner reads .env once when it starts, so writing it here — before
+    # the service exists — is all that is needed, with nothing to restart and
+    # no existing runner to disturb.
+    #
+    # blockinfile rather than copy: some runner versions ship a .env of their
+    # own, and whatever else is in the file is none of this role's business.
+    - name: "Point {{ runner.dirname }} at the serial-execution hooks"
+      ansible.builtin.blockinfile:
+        path: "{{ gha_runner_staging_path }}/.env"
+        create: true
+        owner: "{{ gha_runner_user }}"
+        group: "{{ gha_runner_group_resolved }}"
+        mode: "0644"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK serial execution"
+        block: |
+          ACTIONS_RUNNER_HOOK_JOB_STARTED={{ gha_serial_scripts_path }}/serial_start_hook.sh
+          ACTIONS_RUNNER_HOOK_JOB_COMPLETED={{ gha_serial_scripts_path }}/serial_completed_hook.sh
+      become: true
+      when: runner.serial_execution | bool
+
     # Minted on the control node and valid for one hour. The long-lived PAT
     # never leaves the control node; only this short-lived token is sent to the
     # target host.

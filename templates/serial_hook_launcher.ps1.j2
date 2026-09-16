@@ -1,0 +1,16 @@
+# Installed by the Ansible role Ansible-Actions-Runner; edits here are
+# overwritten on its next run.
+#
+# The serial-execution protocol lives in {{ gha_serial_hook_name }}.sh — the
+# same bash script Linux and macOS run — and this launcher only starts it.
+#
+# The .env could name the .sh directly: the runner would run it with whatever
+# `bash` its PATH resolves. That is the problem. A Windows service inherits the
+# machine environment as it stood at boot, so a runner service created in the
+# same play that just installed git does not have bash on its PATH until the
+# machine reboots, and every job would fail in "Set up runner" until someone
+# worked out why. PowerShell is resolvable regardless — powershell.exe has been
+# on the system path since boot — and this file pins bash by absolute path, so
+# the hooks work from the first job onward.
+& '{{ gha_windows_bash }}' -e '{{ gha_serial_scripts_path_windows | replace('\\', '/') }}/{{ gha_serial_hook_name }}.sh'
+exit $LASTEXITCODE

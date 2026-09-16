@@ -32,6 +32,26 @@
       args:
         creates: "{{ gha_runner_final_path }}"
 
+    # Before config.cmd, which unlike Linux creates and starts the service in
+    # the same breath — the runner reads .env once at startup, so it has to be
+    # in place by then. The values name the .ps1 launchers rather than the .sh
+    # scripts they run (serial_hook_launcher.ps1.j2 explains why), and carry no
+    # quotes, which the runner would take literally (actions/runner#1825).
+    - name: "Point {{ runner.dirname }} at the serial-execution hooks"
+      community.windows.win_lineinfile:
+        path: "{{ gha_runner_final_path }}\\.env"
+        create: true
+        regexp: "^{{ item.var }}="
+        line: "{{ item.var }}={{ gha_serial_scripts_path_windows }}\\{{ item.script }}"
+      loop:
+        - var: ACTIONS_RUNNER_HOOK_JOB_STARTED
+          script: serial_start_hook.ps1
+        - var: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+          script: serial_completed_hook.ps1
+      loop_control:
+        label: "{{ item.var }}"
+      when: runner.serial_execution | bool
+
     - name: "Mint a registration token for {{ runner.repo }}"
       ansible.builtin.uri:
         url: "{{ gha_github_api_url }}/repos/{{ runner.repo }}/actions/runners/registration-token"

@@ -1,0 +1,361 @@
+---
+# Runs the two job hooks the way a runner would, with the environment a job
+# gives them, and checks the four things the protocol rests on: one job at a
+# time, a job releases only its own lock, a lock older than the limit is taken
+# over, and what was in it is kept.
+#
+# The hooks are the part of this feature with no Ansible in it and the part
+# that runs unattended on a machine nobody is watching, so they are tested
+# directly rather than through the role.
+#
+# Every invocation here is `bash -e <script>`, because that is how the runner
+# invokes a .sh hook (actions/runner ADR 1751) — errexit forced on from the
+# command line, which the scripts must survive while looping over commands
+# that are expected to fail. Running them as plain ./script would hide that.
+#
+# Offline. Run it through tests/run.sh.
+
+- name: Check the serial-execution lock protocol
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    gha_sandbox: "{{ playbook_dir }}/../.cache/sandbox-serial"
+    gha_scripts: "{{ playbook_dir }}/../.cache/sandbox-serial/scripts"
+    gha_serial_lock_file: "{{ playbook_dir }}/../.cache/sandbox-serial/lock/gha-serial"
+    gha_serial_stale_minutes: 300
+    # The contention check gives a second job a few seconds to fail to acquire,
+    # which only proves anything if it gets to try more than once.
+    gha_serial_poll_seconds: 1
+    # Two jobs sharing this machine, as the runner presents them to a hook.
+    gha_job_a:
+      RUNNER_NAME: build-linux-1_1
+      GITHUB_REPOSITORY: boostorg/boost
+      GITHUB_WORKFLOW: benchmarks
+      GITHUB_JOB: bench
+      GITHUB_RUN_ID: "1001"
+      GITHUB_RUN_ATTEMPT: "1"
+      GITHUB_SHA: 1111111111111111111111111111111111111111
+      GITHUB_SERVER_URL: https://github.com
+    gha_job_b:
+      RUNNER_NAME: build-linux-1_2
+      GITHUB_REPOSITORY: boostorg/release-tools
+      GITHUB_WORKFLOW: nightly
+      GITHUB_JOB: bench
+      GITHUB_RUN_ID: "2002"
+      GITHUB_RUN_ATTEMPT: "1"
+      GITHUB_SHA: "2222222222222222222222222222222222222222"
+      GITHUB_SERVER_URL: https://github.com
+
+  tasks:
+    # For gha_serial_owner_expr. The identity the two hooks agree on is the
+    # whole basis of the ownership check, so it is taken from the role rather
+    # than restated here where it could drift out of step.
+    - name: Load the role's vars
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/roles/Ansible-Actions-Runner/vars/main.yml"
+
+    - name: Start from an empty sandbox
+      ansible.builtin.file:
+        path: "{{ gha_sandbox }}"
+        state: absent
+
+    - name: Create the sandbox
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ gha_scripts }}"
+        - "{{ gha_serial_lock_file | dirname }}"
+        - "{{ gha_sandbox }}/fakebin"
+        - "{{ gha_sandbox }}/winhome"
+
+    - name: Render the hook scripts
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/Ansible-Actions-Runner/templates/{{ item }}.j2"
+        dest: "{{ gha_scripts }}/{{ item }}"
+        mode: "0755"
+      loop:
+        - serial_start_hook.sh
+        - serial_completed_hook.sh
+
+    - name: Job A takes the machine
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_start_hook.sh"
+      environment: "{{ gha_job_a }}"
+      register: gha_a_start
+      changed_when: true
+
+    - name: Read the lock job A left
+      ansible.builtin.slurp:
+        src: "{{ gha_serial_lock_file }}"
+      register: gha_lock_a
+
+    - name: Show what holding the machine looks like
+      ansible.builtin.debug:
+        msg: "{{ (gha_lock_a.content | b64decode).split('\n') }}"
+
+    # Whoever finds the machine locked has only this file to go on, so it has
+    # to say which job is responsible and where to look at it.
+    - name: The lock says which job holds the machine
+      ansible.builtin.assert:
+        that:
+          - "'owner: build-linux-1_1/1001/1/bench' in gha_lock_text"
+          - "'repository: boostorg/boost' in gha_lock_text"
+          - "'commit: ' ~ gha_job_a.GITHUB_SHA in gha_lock_text"
+          - "'run_url: https://github.com/boostorg/boost/actions/runs/1001' in gha_lock_text"
+          - "'acquired: ' in gha_lock_text"
+        fail_msg: "Got {{ gha_lock_text }}"
+      vars:
+        gha_lock_text: "{{ gha_lock_a.content | b64decode }}"
+
+    # The hook is what the runner blocks on, so a hook that has not returned is
+    # a job that has not started, and being killed while still waiting is the
+    # pass. --kill-after in case the hook is slow to notice the first signal
+    # while it sits in sleep.
+    - name: Job B cannot take the machine while job A holds it
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - --kill-after=1
+          - "4"
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_start_hook.sh"
+      environment: "{{ gha_job_b }}"
+      register: gha_b_blocked
+      changed_when: false
+      failed_when: false
+
+    # Being killed is not on its own proof of waiting — a hook that died of its
+    # own error would look the same from the outside — so what it said on the
+    # way matters as much as how it ended.
+    - name: Job B must still have been waiting when it was killed
+      ansible.builtin.assert:
+        that:
+          - gha_b_blocked.rc != 0
+          - "'another job has this machine' in gha_b_blocked.stdout"
+          - "'owner: build-linux-1_1/1001/1/bench' in gha_b_blocked.stdout"
+          - "'holding' not in gha_b_blocked.stdout"
+        fail_msg: >-
+          The second job stopped waiting while the first still held the lock,
+          so two jobs would have run at once. It reported:
+          {{ gha_b_blocked.stdout }}
+
+    - name: Job B finishing must not release job A's lock
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_completed_hook.sh"
+      environment: "{{ gha_job_b }}"
+      register: gha_b_release
+      changed_when: false
+
+    - name: Read the lock back after job B's completion hook
+      ansible.builtin.slurp:
+        src: "{{ gha_serial_lock_file }}"
+      register: gha_lock_after_b
+
+    - name: Job A's lock must be exactly as it was
+      ansible.builtin.assert:
+        that:
+          - gha_lock_after_b.content == gha_lock_a.content
+        fail_msg: >-
+          A job released a lock it did not hold: {{ gha_b_release.stdout }}
+
+    - name: Job A finishes
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_completed_hook.sh"
+      environment: "{{ gha_job_a }}"
+      register: gha_a_release
+      changed_when: true
+
+    - name: The machine is free again
+      ansible.builtin.stat:
+        path: "{{ gha_serial_lock_file }}"
+      register: gha_lock_gone
+
+    - name: Job A must have released its own lock
+      ansible.builtin.assert:
+        that:
+          - not gha_lock_gone.stat.exists
+        fail_msg: "{{ gha_a_release.stdout }}"
+
+    # From here on: the case the staleness rule exists for. A job dies without
+    # its completion hook ever running — the runner was stopped, or the machine
+    # went down — and its lock is left behind holding the machine.
+    - name: Job A takes the machine again
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_start_hook.sh"
+      environment: "{{ gha_job_a }}"
+      changed_when: true
+
+    # -t rather than -d, which only GNU touch understands.
+    - name: Age job A's lock past the limit
+      ansible.builtin.command:
+        argv:
+          - touch
+          - -t
+          - "{{ '%Y%m%d%H%M' | strftime(ansible_facts['date_time']['epoch'] | int - 21600) }}"
+          - "{{ gha_serial_lock_file }}"
+      changed_when: true
+
+    - name: Job B takes over the abandoned machine
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_start_hook.sh"
+      environment: "{{ gha_job_b }}"
+      register: gha_b_takeover
+      changed_when: true
+
+    - name: Show how the takeover was reported to the job
+      ansible.builtin.debug:
+        var: gha_b_takeover.stdout_lines
+
+    - name: Read the lock after the takeover
+      ansible.builtin.slurp:
+        src: "{{ gha_serial_lock_file }}"
+      register: gha_lock_b
+
+    - name: The machine must now be held by job B
+      ansible.builtin.assert:
+        that:
+          - "'owner: build-linux-1_2/2002/1/bench' in (gha_lock_b.content | b64decode)"
+        fail_msg: "Got {{ gha_lock_b.content | b64decode }}"
+
+    - name: Look for what was salvaged from the abandoned lock
+      ansible.builtin.find:
+        paths: "{{ gha_serial_lock_file | dirname }}"
+        patterns: "{{ gha_serial_lock_file | basename }}.bad.*"
+      register: gha_salvaged
+
+    # Diagnosing why a benchmark machine wedged for five hours depends on the
+    # evidence surviving the takeover.
+    - name: The abandoned lock must have been kept, not just deleted
+      ansible.builtin.assert:
+        that:
+          - gha_salvaged.files | length == 1
+        fail_msg: "Found {{ gha_salvaged.files | map(attribute='path') | list }}"
+
+    - name: Read the salvaged lock
+      ansible.builtin.slurp:
+        src: "{{ gha_salvaged.files[0].path }}"
+      register: gha_salvaged_lock
+
+    - name: The salvaged lock must still name the job that abandoned it
+      ansible.builtin.assert:
+        that:
+          - "'owner: build-linux-1_1/1001/1/bench' in (gha_salvaged_lock.content | b64decode)"
+        fail_msg: "Got {{ gha_salvaged_lock.content | b64decode }}"
+
+    # From here on: the Windows branch. The scripts decide they are on Windows
+    # by what uname prints, and relocate the lock by what HOME holds, so both
+    # can be impersonated here — no Windows machine required to prove the
+    # branch takes the lock where intended and releases it from the same place.
+    - name: Impersonate git bash with a fake uname
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          echo MINGW64_NT-10.0-20348
+        dest: "{{ gha_sandbox }}/fakebin/uname"
+        mode: "0755"
+
+    - name: Job A takes the machine the way it would on Windows
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_start_hook.sh"
+      environment: >-
+        {{ gha_job_a | combine({
+             'PATH': gha_sandbox ~ '/fakebin:/usr/bin:/bin',
+             'HOME': gha_sandbox ~ '/winhome',
+           }) }}
+      changed_when: true
+
+    - name: The lock must have moved under the Windows home
+      ansible.builtin.stat:
+        path: "{{ gha_sandbox }}/winhome/var/lock/{{ gha_serial_lock_file | basename }}"
+      register: gha_win_lock
+
+    - name: A Windows job locks under the service account's profile
+      ansible.builtin.assert:
+        that:
+          - gha_win_lock.stat.exists
+        fail_msg: >-
+          The MINGW branch did not put the lock at $HOME/var/lock, so Windows
+          runners would not contend for the lock at all.
+
+    - name: Job A finishes the Windows way
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -e
+          - "{{ gha_scripts }}/serial_completed_hook.sh"
+      environment: >-
+        {{ gha_job_a | combine({
+             'PATH': gha_sandbox ~ '/fakebin:/usr/bin:/bin',
+             'HOME': gha_sandbox ~ '/winhome',
+           }) }}
+      changed_when: true
+
+    - name: The Windows lock is released from the same relocated path
+      ansible.builtin.stat:
+        path: "{{ gha_sandbox }}/winhome/var/lock/{{ gha_serial_lock_file | basename }}"
+      register: gha_win_lock_gone
+
+    - name: Both hooks must have agreed on where the Windows lock lives
+      ansible.builtin.assert:
+        that:
+          - not gha_win_lock_gone.stat.exists
+        fail_msg: >-
+          The completion hook did not release the relocated lock, so the two
+          hooks compute different paths on Windows.
+
+    # Nothing else renders the PowerShell launcher, so a slip in its template
+    # would otherwise first be seen on a real Windows host.
+    - name: Render the Windows launcher
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/Ansible-Actions-Runner/templates/serial_hook_launcher.ps1.j2"
+        dest: "{{ gha_sandbox }}/serial_start_hook.ps1"
+        mode: "0644"
+      # gha_serial_scripts_dir rather than the derived path: include_vars
+      # outranks task vars, so the role's expression is what resolves here, and
+      # this is the knob it reads.
+      vars:
+        gha_windows_bash: 'C:\Program Files\Git\bin\bash.exe'
+        gha_serial_scripts_dir: 'C:\actions-runner\scripts'
+        gha_serial_hook_name: serial_start_hook
+
+    - name: Read the launcher back
+      ansible.builtin.slurp:
+        src: "{{ gha_sandbox }}/serial_start_hook.ps1"
+      register: gha_launcher
+
+    - name: The launcher pins bash and hands it a forward-slash script path
+      ansible.builtin.assert:
+        that:
+          - "'bash.exe' in gha_launcher_text"
+          - "'C:/actions-runner/scripts/serial_start_hook.sh' in gha_launcher_text"
+          - "'exit $LASTEXITCODE' in gha_launcher_text"
+        fail_msg: "Got {{ gha_launcher_text }}"
+      vars:
+        gha_launcher_text: "{{ gha_launcher.content | b64decode }}"
+
+    - name: Clean up the sandbox
+      ansible.builtin.file:
+        path: "{{ gha_sandbox }}"
+        state: absent

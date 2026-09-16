@@ -19,10 +19,24 @@
     - gha_runners | length > 0
     - not gha_windows_logon_account.upper().startswith('NT AUTHORITY\\')
 
+# Chocolatey bootstraps itself when it is missing, so this works on a machine
+# that has never seen it. Kept ahead of everything else the way the Linux
+# package step is: what follows may depend on what it installs — git bash for
+# the serial-execution hooks above all.
+- name: Install packages
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ gha_win_packages }}"
+    state: present
+  when: gha_win_packages | length > 0
+
 - name: Ensure the runners parent directory exists
   ansible.windows.win_file:
     path: "{{ gha_runners_path }}"
     state: directory
+
+- name: Install the serial-execution job hooks
+  ansible.builtin.include_tasks: serial_hooks_windows.yml
+  when: gha_serial_requested | bool
 
 - name: Check which runner directories already exist
   ansible.windows.win_stat:

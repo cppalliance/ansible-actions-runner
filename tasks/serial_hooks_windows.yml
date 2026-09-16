@@ -1,0 +1,61 @@
+---
+# The Windows counterpart of serial_hooks.yml, under the same rules: host-level
+# rather than per-runner, rewritten on every run so corrections and gha_serial_*
+# changes reach runners that are already installed, and nothing inside a runner
+# directory touched.
+#
+# The protocol scripts are the same bash ones Linux and macOS get; git bash
+# runs them unchanged except that the lock moves under the service account's
+# profile. What Windows adds is a two-line PowerShell launcher per hook —
+# serial_hook_launcher.ps1.j2 explains why the runner cannot be pointed at the
+# .sh directly.
+
+- name: Check that bash is where gha_windows_bash says
+  ansible.windows.win_stat:
+    path: "{{ gha_windows_bash }}"
+  register: gha_windows_bash_stat
+
+- name: Assert that the hooks will have a bash to run under
+  ansible.builtin.assert:
+    that:
+      - gha_windows_bash_stat.stat.exists
+    fail_msg: >-
+      {{ gha_windows_bash }} does not exist, and the serial-execution hooks run
+      under git bash. Leave git in gha_win_packages so Chocolatey installs it,
+      or point gha_windows_bash at a bash.exe that is already there.
+    quiet: true
+
+# The launchers do not need this — they run bash by absolute path — but
+# workflow steps and humans resolving a bare `bash` do, and it is the natural
+# companion of installing git on a CI machine. Idempotent: win_path adds the
+# directory only if it is missing.
+- name: Ensure bash's directory is on the system PATH
+  ansible.windows.win_path:
+    elements: "{{ gha_windows_bash | win_dirname }}"
+    scope: machine
+
+- name: Ensure the hook script directory exists
+  ansible.windows.win_file:
+    path: "{{ gha_serial_scripts_path_windows }}"
+    state: directory
+
+# newline_sequence, because win_template renders CRLF by default and bash
+# reads a CRLF script as syntax with stray \r in it.
+- name: Install the hook scripts
+  ansible.windows.win_template:
+    src: "{{ item }}.j2"
+    dest: "{{ gha_serial_scripts_path_windows }}\\{{ item }}"
+    newline_sequence: "\n"
+  loop:
+    - serial_start_hook.sh
+    - serial_completed_hook.sh
+
+- name: Install the PowerShell launchers the runner invokes
+  ansible.windows.win_template:
+    src: serial_hook_launcher.ps1.j2
+    dest: "{{ gha_serial_scripts_path_windows }}\\{{ item }}.ps1"
+  vars:
+    gha_serial_hook_name: "{{ item }}"
+  loop:
+    - serial_start_hook
+    - serial_completed_hook

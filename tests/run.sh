@@ -25,4 +25,5 @@ ansible-playbook tests/normalize.yml
 ansible-playbook tests/hostname.yml
 ansible-playbook tests/plist.yml
 ansible-playbook tests/skip.yml
+ansible-playbook tests/serial.yml
 ansible-playbook tests/rollback.yml

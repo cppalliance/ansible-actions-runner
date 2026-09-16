@@ -36,6 +36,12 @@
     - gha_runner_os == 'linux'
     - gha_runner_install_dependencies | bool
 
+# Before the runners themselves, because a runner's .env points at these and
+# the service starts as soon as it is installed.
+- name: Install the serial-execution job hooks
+  ansible.builtin.include_tasks: serial_hooks.yml
+  when: gha_serial_requested | bool
+
 - name: Install each pending runner
   ansible.builtin.include_tasks: install_unix_runner.yml
   loop: "{{ gha_runners_pending }}"

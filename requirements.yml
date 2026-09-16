@@ -3,3 +3,8 @@ collections:
   # Only needed when targeting Windows hosts.
   - name: ansible.windows
     version: ">=2.0.0"
+  # Only needed on Windows hosts, and exercised only when something there sets
+  # serial_execution: chocolatey installs git for git bash, community.windows
+  # writes the hook lines into .env.
+  - name: chocolatey.chocolatey
+  - name: community.windows

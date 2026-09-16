@@ -1,0 +1,84 @@
+---
+# Host-level rather than per-runner: every runner that opts in runs these same
+# two scripts and contends for the same lock, so a machine has one copy however
+# many of its runners take turns.
+#
+# These are rewritten on every run, unlike anything inside a runner directory.
+# It is the only way a correction to the protocol, or a change to any of the
+# gha_serial_* variables, reaches runners that are already installed — the
+# scripts carry that configuration, so .env never has to be revisited and no
+# runner has to be restarted. A rewrite while a job holds the lock is safe: the
+# completion hook that eventually releases it is simply the new copy.
+#
+# serial_hooks_windows.yml is this file's Windows counterpart.
+
+- name: Ensure the hook script directory exists
+  ansible.builtin.file:
+    path: "{{ gha_serial_scripts_path }}"
+    state: directory
+    owner: "{{ gha_runner_user }}"
+    group: "{{ gha_runner_group_resolved }}"
+    mode: "0755"
+  become: true
+
+- name: Check the directory the lock will live in
+  ansible.builtin.stat:
+    path: "{{ gha_serial_lock_dir }}"
+  register: gha_serial_lock_dir_stat
+
+# Only when missing, which in practice means macOS: Linux has /var/lock as
+# mode 1777 already, and a directory that exists is not relaxed to suit this
+# role. Whether what exists is good enough is settled by the check below rather
+# than assumed either way.
+- name: Create the directory the lock will live in
+  ansible.builtin.file:
+    path: "{{ gha_serial_lock_dir }}"
+    state: directory
+    owner: root
+    group: "{{ 'wheel' if gha_runner_os == 'osx' else 'root' }}"
+    mode: "1777"
+  become: true
+  when: not gha_serial_lock_dir_stat.stat.exists
+
+- name: Install the job hook scripts
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ gha_serial_scripts_path }}/{{ item }}"
+    owner: "{{ gha_runner_user }}"
+    group: "{{ gha_runner_group_resolved }}"
+    mode: "0755"
+  become: true
+  loop:
+    - serial_start_hook.sh
+    - serial_completed_hook.sh
+
+# The hooks run as the runner user, and a lock that user cannot create would
+# show up only as every job on this machine refusing to start, one job at a
+# time, with the reason buried in a "Set up runner" step. The path is passed as
+# an argument rather than interpolated into the script so that it needs no
+# quoting.
+- name: Check that the runner user can take and release the lock
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - 'probe="$1.probe.$$"; : > "$probe" && rm -f "$probe"'
+      - sh
+      - "{{ gha_serial_lock_file }}"
+  become: true
+  become_user: "{{ gha_runner_user }}"
+  register: gha_serial_probe
+  changed_when: false
+  failed_when: false
+
+- name: Assert that the lock directory is usable by the runner user
+  ansible.builtin.assert:
+    that:
+      - gha_serial_probe.rc == 0
+    fail_msg: >-
+      {{ gha_runner_user }} cannot create files in {{ gha_serial_lock_dir }},
+      so every job on a runner with serial_execution would refuse to start.
+      /var/lock is mode 1777 on a stock Linux system; check that it has not
+      been tightened, or point gha_serial_lock_file at a directory the runner
+      user can write to.
+    quiet: true

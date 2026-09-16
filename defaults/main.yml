@@ -20,6 +20,7 @@
 #   work_dir           defaults to gha_runner_work_dir
 #   no_default_labels  defaults to gha_runner_no_default_labels
 #   extra_config_args  extra flags appended to config.sh/config.cmd
+#   serial_execution   defaults to gha_runner_serial_execution
 gha_runners: []
 
 # Unprivileged account that owns and runs the runners.
@@ -93,6 +94,51 @@ gha_hide_sensitive_logs: true
 # skipped forever". Set to false to leave the wreckage in place for debugging.
 gha_cleanup_on_failure: true
 
+# --- Serial execution ----------------------------------------------------
+
+# Default for entries that do not set serial_execution themselves.
+#
+# A runner already runs one job at a time, but several runners on one machine
+# run their jobs at the same time, which is the point of having several. Where
+# that is not wanted — benchmarks needing the whole machine to produce
+# comparable numbers — the runners that opt in take turns instead: each holds a
+# machine-wide lock for the length of its job, through the runner's own
+# ACTIONS_RUNNER_HOOK_JOB_STARTED and ACTIONS_RUNNER_HOOK_JOB_COMPLETED hooks.
+#
+# Opting in is per runner, so a machine can mix benchmark runners that take
+# turns with ordinary runners that do not. Runners that do not opt in ignore
+# the lock entirely and will still run alongside a benchmark.
+gha_runner_serial_execution: false
+
+# The lock itself. It exists while a job holds the machine and is removed when
+# that job ends. /var/lock is mode 1777 on Linux, so the unprivileged runner
+# user can create and remove its own lock there; macOS has no /var/lock, and
+# the role creates it the same way.
+#
+# On Windows the hooks run under git bash, where this path would land inside
+# the Git installation, so they keep only the file name and put it under
+# $HOME/var/lock of the service logon account instead — the one directory that
+# account can certainly write. All of a machine's runners share that account,
+# so they still contend for a single lock.
+gha_serial_lock_file: /var/lock/gha-serial
+
+# Where the two hook scripts are installed. Empty means <home>/scripts.
+gha_serial_scripts_dir: ""
+
+# How long a lock may exist before it is assumed to belong to a job that died.
+# The completion hook does not run when a runner is stopped or the machine
+# crashes mid-job (actions/runner#2595), so without this the machine would stay
+# locked until someone noticed. Past this age the next job to come along moves
+# the lock aside to <lock>.bad.<timestamp> and takes the machine.
+#
+# It has to exceed the longest job that could legitimately hold the lock.
+# GitHub's own ceiling is 360 minutes, so anything below that can cut short a
+# job that was merely slow rather than dead.
+gha_serial_stale_minutes: 300
+
+# How often a waiting job re-checks the lock.
+gha_serial_poll_seconds: 10
+
 # --- Hostname ------------------------------------------------------------
 
 # Rename the machine to match its inventory entry before installing anything.
@@ -156,6 +202,17 @@ gha_macos_launchctl_method: bootstrap
 gha_macos_process_type_interactive: false
 
 # --- Windows -------------------------------------------------------------
+
+# Installed through Chocolatey before the runners, the way gha_runner_packages
+# is installed on Linux. Chocolatey bootstraps itself if it is missing. git is
+# here for git bash, which the serial-execution hooks run under; set this to []
+# if the machine gets its packages some other way.
+gha_win_packages:
+  - git
+
+# Where git bash lives; the serial-execution hook launchers run it by absolute
+# path. This is where the Chocolatey git package puts it.
+gha_windows_bash: 'C:\Program Files\Git\bin\bash.exe'
 
 # Account the Windows service logs on as. The default needs no password.
 gha_windows_logon_account: 'NT AUTHORITY\NETWORK SERVICE'

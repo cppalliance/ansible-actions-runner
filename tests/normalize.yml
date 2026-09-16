@@ -23,6 +23,7 @@
           - big-memory
       - repo: boostorg/release-tools
         suffix: nightly
+        serial_execution: true
       - repo: boostorg/boost
       - repo: other/thing
         install_as_service: false
@@ -75,6 +76,17 @@
         that:
           - gha_runners_normalized[0].install_as_service | bool
           - not (gha_runners_normalized[4].install_as_service | bool)
+
+    # Opting one runner into taking turns must not opt in the others sharing
+    # the machine, which is the whole point of the setting being per runner.
+    - name: Serial execution is off unless an entry asks for it
+      ansible.builtin.assert:
+        that:
+          - gha_runners_normalized[2].serial_execution | bool
+          - not (gha_runners_normalized[0].serial_execution | bool)
+          - not (gha_runners_normalized[1].serial_execution | bool)
+          - not (gha_runners_normalized[3].serial_execution | bool)
+          - not (gha_runners_normalized[4].serial_execution | bool)
 
     - name: Per-entry work_dir and extra args are carried through
       ansible.builtin.assert:

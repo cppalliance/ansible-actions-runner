@@ -3,7 +3,7 @@
 An Ansible role for installing GitHub Actions self-hosted runners, several per
 machine, on Linux, macOS and Windows.
 
-It is built around three ideas that current existing roles do not cover:
+It is built around four ideas that current existing roles do not cover:
 
 **A machine's runners are described as a list in `host_vars`.** You do not
 invoke the role once per runner. One entry per runner, one run of the role, any
@@ -20,6 +20,13 @@ GUI. This role writes the daemon to `/Library/LaunchDaemons` instead, so
 runners come up at boot over plain SSH with nobody logged in. See
 [actions/runner#1056](https://github.com/actions/runner/issues/1056).
 
+**Runners can be made to take turns.** Several runners on one machine normally
+run their jobs at the same time, which is why you would install several. Where
+that ruins the results — benchmarks, which need the whole machine to produce
+comparable numbers — the runners that opt in hold a machine-wide lock for the
+length of a job instead. Off by default, and set per runner, so a machine can
+mix benchmark runners that take turns with ordinary ones that do not.
+
 You do not have to look up the runner version or paste registration tokens.
 The role resolves the latest release from the GitHub API and mints a
 short-lived registration token per runner, both from the control node.
@@ -27,8 +34,9 @@ short-lived registration token per runner, both from the control node.
 ## Requirements
 
 - Ansible 2.14 or newer on the control node.
-- `ansible.windows` (`ansible-galaxy collection install -r requirements.yml`),
-  only if you target Windows.
+- `ansible.windows`, `community.windows` and `chocolatey.chocolatey`
+  (`ansible-galaxy collection install -r requirements.yml`), only if you
+  target Windows.
 - A GitHub token on the **control node**, with `repo` scope on a classic PAT or
   *Administration: read & write* on a fine-grained PAT.
 
@@ -104,6 +112,7 @@ something else.
 | `work_dir` | `_work` | Working directory, relative to the runner |
 | `no_default_labels` | `false` | Suppress GitHub's `self-hosted`/OS/arch labels |
 | `extra_config_args` | `""` | Extra flags for `config.sh`, e.g. `--ephemeral` |
+| `serial_execution` | `gha_runner_serial_execution` | Take turns with the machine's other serial runners |
 
 ## Naming the machine
 
@@ -184,6 +193,129 @@ account's profile. To use a real account instead, set
 travels via `ACTIONS_RUNNER_INPUT_WINDOWSLOGONPASSWORD` rather than the command
 line, so metacharacters survive.
 
+## Making runners take turns
+
+A runner runs one job at a time, but two runners on a machine run two jobs at a
+time, and a benchmark that shared the machine with a compile produces a number
+that means nothing. Setting `serial_execution: true` on the runners that care
+makes them take turns:
+
+```yaml
+gha_runners:
+  - repo: boostorg/boost
+    labels: [benchmark]
+    serial_execution: true
+
+  - repo: boostorg/charconv
+    labels: [benchmark]
+    serial_execution: true
+
+  # Ordinary runner. Ignores the lock and runs whenever it likes.
+  - repo: boostorg/release-tools
+```
+
+The obvious alternative, one organization-level runner serving every
+repository, does the same thing more simply and needs none of this — jobs from
+anywhere in the organization queue up on one runner and GitHub shows them as
+queued rather than mysteriously slow. It stops working as soon as the machine
+is shared between *different* GitHub organizations, which no single runner
+registration spans. That is what this is for.
+
+### How it works
+
+Each participating runner gets two lines in its `.env`, pointing at the
+runner's own job hooks:
+
+```
+ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/gha/scripts/serial_start_hook.sh
+ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/gha/scripts/serial_completed_hook.sh
+```
+
+The runner runs those synchronously, and does not begin a job's steps until the
+started hook returns, so the hook waiting is the whole mechanism. It waits for
+`/var/lock/gha-serial`, creates it, and the completion hook removes it again.
+Nothing in any workflow changes, which is the reason for doing it at this level
+rather than with a mutex step: the repositories involved need to know nothing
+about it, and cannot forget to cooperate.
+
+Waiting is visible. It happens inside the job's "Set up runner" step, which
+reports what is holding the machine and repeats that every five minutes:
+
+```
+serial-lock: another job has this machine. Waiting for /var/lock/gha-serial, held by:
+    owner: build-linux-1_1/18542399201/1/bench
+    repository: boostorg/boost
+    workflow: benchmarks
+    commit: 9fceb02...
+    run_url: https://github.com/boostorg/boost/actions/runs/18542399201
+    acquired: 2026-09-16 10:54:27 -0600
+```
+
+The lock file holds that description because a locked benchmark machine is
+something a person ends up looking at. Only the `owner` line is load-bearing:
+a completion hook removes the lock only while that line still matches its own
+job, so a job cannot release a lock that has become somebody else's.
+
+### When a job dies holding the lock
+
+The completion hook does not run if the runner is stopped or the machine goes
+down mid-job ([actions/runner#2595](https://github.com/actions/runner/issues/2595)),
+which would otherwise leave the machine locked until someone noticed. So a lock
+older than `gha_serial_stale_minutes` — five hours by default — is treated as
+abandoned: the next job to come along moves it to
+`/var/lock/gha-serial.bad.<timestamp>` and takes the machine, and says so in
+its log. The file is kept rather than deleted because five hours of a wedged
+benchmark machine is worth being able to explain afterwards.
+
+The limit has to be longer than any job that could legitimately hold the lock,
+or a job that was merely slow gets the machine pulled out from under it while
+it runs. GitHub's own ceiling on a job is 360 minutes.
+
+### On Windows
+
+The same two bash scripts run the protocol, under git bash. The role installs
+git through Chocolatey (`gha_win_packages`, bootstrapping Chocolatey itself if
+needed) and puts the scripts next to the runner directories —
+`C:\actions-runner\scripts` by default.
+
+Two things differ. The lock cannot live at `/var/lock`, which under git bash
+would resolve to a directory inside the Git installation, so on Windows the
+scripts keep only the file name and put it under `$HOME/var/lock` of the
+service logon account — `C:\Windows\ServiceProfiles\NetworkService` for the
+default account. Every runner on the machine logs on as the same account, so
+they still contend for a single lock.
+
+And `.env` does not name the `.sh` files directly. A `.sh` hook makes the
+runner look up `bash` through the service's `PATH`, and a Windows service
+keeps the machine environment from boot — a runner service created in the same
+play that just installed git would not find bash until the machine rebooted,
+and every job would fail in "Set up runner" in the meantime. So each hook is a
+two-line PowerShell launcher instead: PowerShell resolves regardless, because
+`powershell.exe` has been on the system path since boot, and the launcher runs
+the bash script with bash pinned by absolute path (`gha_windows_bash`).
+
+### What to know before turning it on
+
+Waiting counts against the waiting job's own `timeout-minutes`, which is the
+only bound on it — the hooks do not impose one, because failing a job that was
+only queued, or running it without the lock, are both worse on a machine kept
+serial for a reason. A queue longer than the timeout means a job that fails
+having never run.
+
+Turns are not taken in order. Of several jobs waiting, the one that gets the
+machine next is whichever notices first, so with enough traffic a busy
+repository can keep a quiet one waiting.
+
+Only runners with `serial_execution` respect the lock. An ordinary runner on
+the same machine will happily run a job alongside a benchmark.
+
+The two hook scripts are shared by the whole machine, and unlike a runner
+directory they are rewritten every time the role runs. That is the only way a
+change to any of the `gha_serial_*` variables reaches runners that are already
+installed, and it is why those settings live in the scripts rather than in each
+runner's `.env` — nothing inside a runner directory is revisited, and no runner
+is ever restarted.
+
 ## How "skip if it exists" stays honest
 
 A plain "directory exists, therefore skip" rule has a nasty failure mode: if a
@@ -241,12 +373,17 @@ The commonly useful ones; `defaults/main.yml` documents the rest.
 | `gha_runner_install_dependencies` | `true` | Run the runner's `installdependencies.sh` |
 | `gha_runner_default_labels` | `[]` | Labels for entries that specify none |
 | `gha_runner_install_as_service` | `true` | Default for entries that do not say |
+| `gha_runner_serial_execution` | `false` | Default for entries that do not say |
+| `gha_serial_lock_file` | `/var/lock/gha-serial` | The lock the serial runners contend for |
+| `gha_serial_stale_minutes` | `300` | Age at which a lock is treated as abandoned |
 | `gha_github_token` | `$GITHUB_TOKEN` | Control-node token |
 | `gha_cleanup_on_failure` | `true` | Roll back a failed install |
 | `gha_verify_registration` | `true` | Confirm the runner appears in the repo afterwards |
 | `gha_macos_use_launch_daemon` | `true` | LaunchDaemon instead of LaunchAgent |
 | `gha_macos_launchctl_method` | `bootstrap` | Or `load` for the older form |
 | `gha_windows_logon_account` | `NT AUTHORITY\NETWORK SERVICE` | Windows service account |
+| `gha_win_packages` | `[git]` | Chocolatey packages installed on Windows before anything else |
+| `gha_windows_bash` | `C:\Program Files\Git\bin\bash.exe` | The bash the Windows hooks run under |
 
 ## Tests
 
@@ -263,6 +400,11 @@ The commonly useful ones; `defaults/main.yml` documents the rest.
   `plistlib`, since macOS itself cannot be tested from Linux CI. Offline.
 - `skip.yml` — proves a pre-existing runner directory is left byte-for-byte
   alone while a second runner is still attempted. Offline.
+- `serial.yml` — runs the two job hooks exactly as the runner does (`bash -e`)
+  with the environment a real job gives them, and checks that one job at a time
+  gets the machine, that a job releases only its own lock, that an abandoned
+  lock is taken over and kept, and — with `uname` and `HOME` impersonated —
+  that the Windows branch relocates the lock consistently. Offline.
 - `rollback.yml` — runs the real Linux install path with a deliberately invalid
   token and asserts that the rollback leaves nothing behind. Downloads the real
   runner tarball; never registers anything with GitHub.

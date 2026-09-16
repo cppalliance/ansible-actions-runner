@@ -72,6 +72,7 @@
       install_as_service: "{{ item.install_as_service | default(gha_runner_install_as_service) }}"
       work_dir: "{{ item.work_dir | default(gha_runner_work_dir, true) }}"
       extra_config_args: "{{ item.extra_config_args | default(gha_runner_extra_config_args, true) }}"
+      serial_execution: "{{ item.serial_execution | default(gha_runner_serial_execution) }}"
   loop: "{{ gha_runners }}"
   loop_control:
     label: "{{ item.repo }}"

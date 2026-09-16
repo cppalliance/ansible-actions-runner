@@ -52,3 +52,31 @@ gha_macos_hostnames:
 # name without the dot always denotes a finished runner.
 gha_staging_prefix: "."
 gha_staging_suffix: ".staging"
+
+# Whether anything on this host asked to take turns. Evaluated where it is
+# used, so it reads gha_runners_normalized as preflight.yml leaves it.
+gha_serial_requested: >-
+  {{ gha_runners_normalized | default([]) | map(attribute='serial_execution')
+     | map('bool') | select | list | length > 0 }}
+
+gha_serial_scripts_path: >-
+  {{ gha_serial_scripts_dir if gha_serial_scripts_dir | length > 0 else gha_runner_home_path ~ '/scripts' }}
+gha_serial_lock_dir: "{{ gha_serial_lock_file | dirname }}"
+
+# Windows keeps the scripts beside the runner directories rather than under a
+# home: the runners live off the drive root for the same service-account
+# reasons, and gha_runners_path is resolved by then.
+gha_serial_scripts_path_windows: >-
+  {{ gha_serial_scripts_dir if gha_serial_scripts_dir | length > 0 else gha_runners_path ~ '\scripts' }}
+
+# The identity a job holds the serial-execution lock under. Both hook scripts
+# render this one expression: the completion hook releases the lock only while
+# the value in it still matches, and if the two ever computed the identity
+# differently a job would refuse to release its own lock.
+#
+# The job's own environment is the only thing both hooks share — they are
+# separate processes with nothing between them but the lock file — and the run
+# id distinguishes concurrent jobs, the attempt a retry, the runner name two
+# runners on this machine running the same job of the same workflow.
+gha_serial_owner_expr: >-
+  ${RUNNER_NAME:-unknown-runner}/${GITHUB_RUN_ID:-no-run-id}/${GITHUB_RUN_ATTEMPT:-1}/${GITHUB_JOB:-no-job}

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# ACTIONS_RUNNER_HOOK_JOB_COMPLETED. Installed by the Ansible role
+# Ansible-Actions-Runner; edits here are overwritten on its next run.
+#
+# Releases {{ gha_serial_lock_file }}, taken by serial_start_hook.sh, so the
+# next job waiting for this machine can start.
+#
+# Always exits 0. Failing a job that has already run its steps because the
+# lock could not be tidied up would report a build problem that is not one,
+# and this hook is not the only thing standing between a crash and a machine
+# locked forever: it does not run at all when a runner is stopped or dies
+# mid-job (actions/runner#2595), which is what the staleness rule in the start
+# hook exists to cover.
+
+# set +e for the same reason as in serial_start_hook.sh: the runner invokes
+# hooks as `bash -e <script>`, and a hook that promises to always exit 0 cannot
+# afford to be killed by a sed on a lock file that vanished under it.
+set +e
+set -uo pipefail
+
+lock={{ gha_serial_lock_file | quote }}
+
+# The same Windows relocation as in serial_start_hook.sh. The two must agree,
+# or a lock would be taken in one place and looked for in another.
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+        lock="${HOME}/var/lock/${lock##*/}"
+        ;;
+esac
+
+owner="{{ gha_serial_owner_expr }}"
+
+say() {
+    printf 'serial-lock: %s\n' "$*"
+}
+
+if [ ! -e "$lock" ]; then
+    say "$lock is already gone, so there is nothing to release."
+    exit 0
+fi
+
+holder=$(sed -n 's/^owner: //p' "$lock" 2>/dev/null | head -n 1)
+
+# Releasing a lock this job does not hold would hand the machine to a third job
+# while the second was still using it. The case is real rather than
+# theoretical: a job that outlives gha_serial_stale_minutes has its lock taken
+# away while it is still running, and it eventually arrives here to find
+# someone else's lock in place.
+if [ "$holder" != "$owner" ]; then
+    say "WARNING: $lock is held by '${holder:-nothing this hook can read}', not by this job."
+    say "this job is '$owner'. Leaving the lock alone: it was most likely"
+    say "declared stale and taken over while this job was still running."
+    exit 0
+fi
+
+if rm -f "$lock"; then
+    say "released $lock"
+else
+    say "WARNING: $lock could not be removed. Jobs will queue behind it until it is"
+    say "{{ gha_serial_stale_minutes }} minutes old, at which point the next one takes the machine."
+fi
+
+exit 0

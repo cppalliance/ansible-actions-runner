@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# ACTIONS_RUNNER_HOOK_JOB_STARTED. Installed by the Ansible role
+# Ansible-Actions-Runner; edits here are overwritten on its next run.
+#
+# Takes {{ gha_serial_lock_file }} and holds it for the length of one job, so
+# that the runners sharing this machine take turns rather than competing for
+# its CPU and memory. The runner runs this synchronously and does not begin the
+# job's steps until it exits, so waiting here is what serializes the machine.
+# The wait shows up in the job's "Set up runner" step.
+#
+# Nothing bounds the wait except the job's own timeout-minutes, and the time
+# spent waiting counts against it. Cutting the wait short would mean either
+# failing a job that was only queued or running it without the lock, and on a
+# machine kept serial for benchmark numbers both are worse than queueing.
+#
+# Exiting non-zero makes the runner refuse the job, which is deliberate for
+# every failure below: a benchmark that ran alongside something else is worse
+# than one that did not run.
+
+# The runner does not run this file directly: it invokes `bash -e <script>`
+# (actions/runner ADR 1751), with errexit forced on from the command line.
+# Under errexit, any passing failure — a sed on a lock file that vanished
+# between two checks — would kill a hook whose loop expects commands to fail
+# while another job holds the lock. So errexit is switched off explicitly
+# rather than merely not requested.
+set +e
+set -uo pipefail
+
+lock={{ gha_serial_lock_file | quote }}
+stale_minutes={{ gha_serial_stale_minutes }}
+poll_seconds={{ gha_serial_poll_seconds }}
+report_every=300
+
+# Under git bash on Windows, /var/lock would resolve to var/lock inside the
+# Git installation, which the account running the hooks cannot write to. That
+# account's own profile is the one place it certainly can, and every runner on
+# a Windows machine logs on as the same account, so they all compute this same
+# path and still contend for a single lock.
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+        lock="${HOME}/var/lock/${lock##*/}"
+        mkdir -p "${HOME}/var/lock"
+        ;;
+esac
+
+owner="{{ gha_serial_owner_expr }}"
+
+say() {
+    printf 'serial-lock: %s\n' "$*"
+}
+
+die() {
+    printf 'serial-lock: ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+# Only fields whose value is known are written, so an unset variable leaves the
+# line out instead of writing a misleading empty one.
+field() {
+    if [ -n "${2:-}" ]; then
+        printf '%s: %s\n' "$1" "$2"
+    fi
+}
+
+# Whatever is useful to whoever finds the machine locked and wants to know by
+# what. Nothing parses this but the owner line, read back by the completion
+# hook.
+payload() {
+    field owner "$owner"
+    field runner "${RUNNER_NAME:-}"
+    field repository "${GITHUB_REPOSITORY:-}"
+    field workflow "${GITHUB_WORKFLOW:-}"
+    field job "${GITHUB_JOB:-}"
+    field commit "${GITHUB_SHA:-}"
+    field ref "${GITHUB_REF:-}"
+    field event "${GITHUB_EVENT_NAME:-}"
+    field actor "${GITHUB_ACTOR:-}"
+    if [ -n "${GITHUB_SERVER_URL:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_RUN_ID:-}" ]; then
+        field run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+    fi
+    field workspace "${GITHUB_WORKSPACE:-}"
+    field cwd "$PWD"
+    field host "$(hostname)"
+    field acquired "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    field pid "$$"
+}
+
+# noclobber makes the redirect an exclusive create, so if several runners reach
+# this in the same instant exactly one of them wins and the others see the file
+# already there. Checking for the file first and then writing it would let both
+# through.
+acquire() {
+    (
+        set -o noclobber
+        payload > "$lock"
+    ) 2>/dev/null
+}
+
+held_by() {
+    sed -n 's/^owner: //p' "$lock" 2>/dev/null | head -n 1
+}
+
+# find rather than stat: the two stats disagree about how to print an mtime
+# (-c %Y on Linux, -f %m on macOS) and neither needs to be parsed to answer
+# this. Nothing refreshes the lock while it is held, so its mtime is the moment
+# it was taken.
+stale() {
+    [ -n "$(find "$lock" -mmin +"$stale_minutes" 2>/dev/null)" ]
+}
+
+# mv, not cp followed by rm: the rename is one operation, so the lock cannot
+# end up both preserved and still held, and it carries the original timestamps
+# over for whoever works out what happened. Acquiring is left to the exclusive
+# create at the top of the loop, so of several jobs that all find the same lock
+# stale, only one ends up with the machine.
+salvage() {
+    aside="$lock.bad.$(date '+%Y%m%d-%H%M%S')"
+    if mv "$lock" "$aside" 2>/dev/null; then
+        say "the lock was more than $stale_minutes minutes old, so the job holding it is presumed dead."
+        say "what it contained is now in $aside:"
+        sed 's/^/    /' "$aside" 2>/dev/null
+    fi
+}
+
+lock_dir=$(dirname "$lock")
+[ -d "$lock_dir" ] || die "$lock_dir does not exist, so $lock cannot be taken."
+[ -w "$lock_dir" ] || die "$lock_dir is not writable by $(id -un), so $lock cannot be taken."
+
+waited=0
+next_report=$report_every
+
+while ! acquire; do
+    # Contention is the only reason to keep trying. If the lock is not there
+    # and creating it still failed, retrying forever would hang every job on
+    # this machine behind a problem that is not going to resolve itself.
+    if [ ! -e "$lock" ]; then
+        die "$lock could not be created, and nothing is holding it. Check $lock_dir."
+    fi
+
+    if stale; then
+        salvage
+        continue
+    fi
+
+    if [ "$waited" -eq 0 ]; then
+        say "another job has this machine. Waiting for $lock, held by:"
+        sed 's/^/    /' "$lock" 2>/dev/null
+    elif [ "$waited" -ge "$next_report" ]; then
+        say "still waiting after $((waited / 60)) minutes. Held by: $(held_by)"
+        next_report=$((next_report + report_every))
+    fi
+
+    sleep "$poll_seconds"
+    waited=$((waited + poll_seconds))
+done
+
+if [ "$waited" -gt 0 ]; then
+    say "waited $((waited / 60))m$((waited % 60))s for the machine."
+fi
+say "holding $lock as $owner"
